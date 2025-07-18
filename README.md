@@ -1,7 +1,6 @@
 # jansport_360
 Neural Network
 
-
 Structure:
 Imports: Brings in tools needed to build and train neural networks, read data files, and prepare the data.
 torch: Core library for deep learning.
