@@ -36,3 +36,5 @@ Main Program: Put together and run it
 This is the central function that loads and normalizes data, prepares training sequences, initializes the models, trains each model using the function above
 Keep your code organized and modular.
 You can change models or data without touching training logic.
+
+pip install torch torchvision torchaudio pandas numpy scikit-learn matplotlib openpyxl
