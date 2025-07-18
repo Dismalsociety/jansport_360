@@ -17,10 +17,13 @@ LR = 0.001
 HIDDEN_SIZE = 64
 
 
+
 # Load data from Excel
 def load_data(filepath):
-   df = pd.read_excel(filepath)
-   return df[['Flow Rate (gpm)']].values, df[['Pressure (psi)']].values
+    df = pd.read_excel(filepath)
+    df.columns = df.columns.str.strip()  # Remove spaces from start/end of each column name
+    print("Cleaned column names:", list(df.columns))  # Debugging
+    return df[['Flow Rate (gpm)']].values, df[['Predicted Pressure (psiA)']].values
 
 
 # Dataset class
@@ -188,4 +191,4 @@ def main(filepath):
 
 
 # Call main directly
-main('flow_and_pressure_data.xlsx')  # Replace with your actual Excel filename
+main('flow_rate_with_pressure - Copy (1).xlsx')  # Replace with your actual Excel filename
