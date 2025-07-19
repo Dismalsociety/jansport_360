@@ -1,5 +1,3 @@
-#Version 1: Basic LSTM Model; Simple LSTM with basic normalization; Single combined dataset; Basic MSE loss
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
