@@ -1,0 +1,160 @@
+#Version 1: Basic LSTM Model; Simple LSTM with basic normalization; Single combined dataset; Basic MSE loss
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import Dataset, DataLoader
+
+# ─── Configuration ────────────────────────────────────────────────────────────
+class Config:
+    # Data parameters
+    seq_len = 20
+    pred_len = 5
+    
+    # Model parameters
+    input_dim = 2
+    hidden_dim = 64
+    
+    # Training parameters
+    batch_size = 32
+    lr = 0.001
+    num_epochs = 50
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# ─── Data Processing ──────────────────────────────────────────────────────────
+class DataProcessor:
+    def __init__(self):
+        self.scaler = StandardScaler()
+    
+    def load_and_normalize(self, filepath):
+        """Load data and normalize"""
+        df = pd.read_excel(filepath)
+        flows = df['Flow Rate (gpm)'].values
+        pressures = df['Predicted Pressure (psiA)'].values
+        
+        # Combine and normalize
+        data = np.column_stack([flows, pressures])
+        data_norm = self.scaler.fit_transform(data)
+        
+        return data_norm, flows, pressures
+    
+    def make_sequences(self, data, seq_len, pred_len):
+        """Create sequences for training"""
+        X, Y = [], []
+        for i in range(len(data) - seq_len - pred_len + 1):
+            X.append(data[i:i+seq_len])
+            Y.append(data[i+seq_len:i+seq_len+pred_len, 1])  # Only pressure
+        return np.array(X), np.array(Y)
+
+# ─── Dataset ──────────────────────────────────────────────────────────────────
+class SimpleDataset(Dataset):
+    def __init__(self, X, Y):
+        self.X = torch.FloatTensor(X)
+        self.Y = torch.FloatTensor(Y)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.Y[idx]
+
+# ─── Model ────────────────────────────────────────────────────────────────────
+class BasicLSTM(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.lstm = nn.LSTM(config.input_dim, config.hidden_dim, batch_first=True)
+        self.fc = nn.Linear(config.hidden_dim, config.pred_len)
+        
+    def forward(self, x):
+        # x: [batch, seq_len, features]
+        out, (h, c) = self.lstm(x)
+        # Use last hidden state
+        out = self.fc(h[-1])
+        return out
+
+# ─── Training Functions ───────────────────────────────────────────────────────
+def train_model(config):
+    # Process data
+    processor = DataProcessor()
+    data_norm, flows, pressures = processor.load_and_normalize('generated_training_data_3.xlsx')
+    X, Y = processor.make_sequences(data_norm, config.seq_len, config.pred_len)
+    
+    # Train/test split
+    split = int(0.8 * len(X))
+    X_train, Y_train = X[:split], Y[:split]
+    X_test, Y_test = X[split:], Y[split:]
+    
+    # Create datasets and loaders
+    train_ds = SimpleDataset(X_train, Y_train)
+    test_ds = SimpleDataset(X_test, Y_test)
+    train_loader = DataLoader(train_ds, batch_size=config.batch_size, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=config.batch_size, shuffle=False)
+    
+    # Initialize model
+    model = BasicLSTM(config).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=config.lr)
+    
+    # Training loop
+    print("Training basic LSTM model...")
+    for epoch in range(config.num_epochs):
+        model.train()
+        train_loss = 0
+        
+        for X_batch, Y_batch in train_loader:
+            X_batch, Y_batch = X_batch.to(device), Y_batch.to(device)
+            
+            optimizer.zero_grad()
+            pred = model(X_batch)
+            loss = criterion(pred, Y_batch)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        if (epoch + 1) % 10 == 0:
+            avg_loss = train_loss / len(train_loader)
+            print(f'Epoch {epoch+1}/{config.num_epochs}, Loss: {avg_loss:.4f}')
+    
+    return model, test_loader
+
+def evaluate_model(model, test_loader):
+    """Evaluate model and plot results"""
+    model.eval()
+    test_preds = []
+    test_trues = []
+    
+    with torch.no_grad():
+        for X_batch, Y_batch in test_loader:
+            X_batch = X_batch.to(device)
+            pred = model(X_batch)
+            test_preds.append(pred.cpu().numpy())
+            test_trues.append(Y_batch.numpy())
+    
+    preds = np.vstack(test_preds)
+    trues = np.vstack(test_trues)
+    
+    # Plot results
+    plt.figure(figsize=(10, 6))
+    plt.plot(trues[:, 0], label='True', alpha=0.7)
+    plt.plot(preds[:, 0], label='Predicted', alpha=0.7)
+    plt.title('Basic LSTM: Next-Step Pressure Prediction')
+    plt.xlabel('Sample')
+    plt.ylabel('Normalized Pressure')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+    
+    mse = np.mean((preds - trues)**2)
+    print(f"Test MSE: {mse:.4f}")
+
+# ─── Main Execution ───────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    config = Config()
+    model, test_loader = train_model(config)
+    evaluate_model(model, test_loader)
