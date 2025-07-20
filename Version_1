@@ -1,3 +1,4 @@
+# SECTION 1 : Imports and Libraries
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
@@ -6,7 +7,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 
-# Basic settings
+# SECTION 2 : Basic settings
 SEQ_LENGTH = 20  # How many past points to look at
 PRED_LENGTH = 5  # How many future points to predict
 HIDDEN_SIZE = 64  # Size of LSTM hidden layer
@@ -15,14 +16,14 @@ LEARNING_RATE = 0.001
 EPOCHS = 50
 
 
-# Check if GPU is available
+# SECTION 3 : Check if GPU is available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 
-# Load the data
+# SECTION 4 : Load the data
 print("Loading data...")
-df = pd.read_excel('generated_training_data_2.xlsx')
+df = pd.read_excel('generated_training_data.xlsx')
 flows = df['Flow Rate (gpm)'].values
 pressures = df['Predicted Pressure (psiA)'].values
 
@@ -31,12 +32,12 @@ pressures = df['Predicted Pressure (psiA)'].values
 data = np.column_stack([flows, pressures])
 
 
-# Normalize the data
+# SECTION 5 : Normalize the data
 scaler = StandardScaler()
 data_normalized = scaler.fit_transform(data)
 
 
-# Create sequences for training
+# SECTION 6 : Create sequences for training
 print("Creating sequences...")
 X_data = []  # Input sequences
 Y_data = []  # Target values
@@ -56,7 +57,7 @@ X_data = np.array(X_data)
 Y_data = np.array(Y_data)
 
 
-# Split data into train and test (80/20 split)
+# SECTION 7 : Split data into train and test (80/20 split)
 split_point = int(0.8 * len(X_data))
 X_train = torch.FloatTensor(X_data[:split_point])
 Y_train = torch.FloatTensor(Y_data[:split_point])
@@ -68,7 +69,7 @@ print(f"Training samples: {len(X_train)}")
 print(f"Test samples: {len(X_test)}")
 
 
-# Define the LSTM + Dense model
+# SECTION 8 : Define the LSTM + Dense model
 class LSTMDenseModel(nn.Module):
     def __init__(self):
         super(LSTMDenseModel, self).__init__()
@@ -95,7 +96,7 @@ class LSTMDenseModel(nn.Module):
         return predictions
 
 
-# Create model, loss function, and optimizer
+# SECTION 9 : Create model, loss function, and optimizer
 model = LSTMDenseModel().to(device)
 loss_function = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -106,7 +107,7 @@ total_params = sum(p.numel() for p in model.parameters())
 print(f"\nModel has {total_params:,} parameters")
 
 
-# Training loop
+# SECTION 10 : Training loop
 print("\nStarting training...")
 train_losses = []
 
@@ -141,7 +142,7 @@ for epoch in range(EPOCHS):
         print(f'Epoch {epoch+1}/{EPOCHS}, Loss: {avg_loss:.4f}')
 
 
-# Test the model
+# SECTION 11 : Test the model
 print("\nTesting model...")
 model.eval()  # Set to evaluation mode
 
@@ -166,7 +167,7 @@ predictions_array = np.vstack(all_predictions)
 targets_array = np.vstack(all_targets)
 
 
-# Denormalize to get actual pressure values
+# SECTION 12 : Denormalize to get actual pressure values
 pressure_mean = scaler.mean_[1]
 pressure_std = scaler.scale_[1]
 
@@ -184,7 +185,7 @@ print(f"MSE (normalized): {mse:.4f}")
 print(f"MAE: {mae:.2f} psiA")
 print(f"RMSE: {rmse:.2f} psiA")
 
-
+# SECTION 13 : Evaluation Plots
 # Plot 1: Training loss
 plt.figure(figsize=(10, 5))
 plt.subplot(1, 2, 1)
@@ -197,8 +198,8 @@ plt.grid(True, alpha=0.3)
 
 # Plot 2: Predictions vs Actual
 plt.subplot(1, 2, 2)
-plt.plot(targets_actual[:100, 0], label='Actual Pressure', alpha=0.7)
-plt.plot(predictions_actual[:100, 0], label='Predicted Pressure', alpha=0.7)
+plt.plot(targets_actual[:, 0], label='Actual Pressure', alpha=0.7)
+plt.plot(predictions_actual[:, 0], label='Predicted Pressure', alpha=0.7)
 plt.title('LSTM + Dense: Pressure Predictions')
 plt.xlabel('Test Sample')
 plt.ylabel('Pressure (psiA)')
