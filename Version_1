@@ -176,12 +176,10 @@ targets_actual = targets_array * pressure_std + pressure_mean
 
 
 # Calculate error metrics
-mse = np.mean((predictions_array - targets_array)**2)
 mae = np.mean(np.abs(predictions_actual - targets_actual))
 rmse = np.sqrt(np.mean((predictions_actual - targets_actual)**2))
 
 print(f"\nTest Results:")
-print(f"MSE (normalized): {mse:.4f}")
 print(f"MAE: {mae:.2f} psiA")
 print(f"RMSE: {rmse:.2f} psiA")
 
