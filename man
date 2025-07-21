@@ -1,0 +1,119 @@
+# my flow peak script
+# i need to look at flow peaks and make small ones bigger
+
+import pandas as pd
+import numpy as np
+
+# read the excel file
+print("reading file...")
+df = pd.read_excel("generated_training_data.xlsx")
+print("got the data")
+
+# find the flow column
+flow_col = None
+for col in df.columns:
+    if 'flow' in col.lower():
+        flow_col = col
+        break
+
+print("flow column is: " + flow_col)
+
+# find peaks in flow data
+peaks = []
+flow_data = df[flow_col].values
+
+for i in range(1, len(flow_data) - 1):
+    # check if its a peak
+    if flow_data[i] > flow_data[i-1] and flow_data[i] > flow_data[i+1]:
+        peaks.append(i)
+
+print("found " + str(len(peaks)) + " peaks")
+
+# make small peaks bigger
+new_df = df.copy()
+
+for peak in peaks:
+    peak_value = df.iloc[peak][flow_col]
+    
+    # if peak is less than 100 make it bigger
+    if peak_value < 100 and peak_value > 50:
+        
+        # how much to add
+        boost = 100 - peak_value + 5
+        
+        # boost the peak and nearby points
+        for j in range(peak - 20, peak + 20):
+            if j >= 0 and j < len(df):
+                old_value = new_df.iloc[j][flow_col]
+                new_value = old_value + boost
+                new_df.iloc[j, new_df.columns.get_loc(flow_col)] = new_value
+        
+        print("boosted peak at " + str(peak))
+
+# stretch time around peaks
+time_col = df.columns[0]
+times = new_df[time_col].values
+
+for peak in peaks:
+    # stretch time for 30 points around peak
+    start = max(0, peak - 30)
+    end = min(len(times), peak + 30)
+    
+    # make time go slower
+    for k in range(start, end):
+        times[k] = times[k] * 2
+
+# fix times so they go in order
+for i in range(1, len(times)):
+    if times[i] <= times[i-1]:
+        times[i] = times[i-1] + 0.001
+
+new_df[time_col] = times
+
+# add more points near peaks
+final_data = []
+
+for i in range(len(new_df)):
+    final_data.append(new_df.iloc[i])
+    
+    # check if near a peak
+    near_peak = False
+    for peak in peaks:
+        if abs(i - peak) <= 15:
+            near_peak = True
+            break
+    
+    # add extra points if near peak
+    if near_peak and i < len(new_df) - 1:
+        current = new_df.iloc[i]
+        next_one = new_df.iloc[i + 1]
+        
+        # add 5 points between
+        for j in range(1, 6):
+            new_point = {}
+            for col in new_df.columns:
+                if pd.api.types.is_numeric_dtype(new_df[col]):
+                    # average the values
+                    new_point[col] = current[col] + (next_one[col] - current[col]) * (j / 6)
+                else:
+                    new_point[col] = current[col]
+            
+            final_data.append(pd.Series(new_point))
+
+# make final dataframe
+final_df = pd.DataFrame(final_data)
+
+# save to excel
+print("saving results...")
+
+with pd.ExcelWriter("flow_results.xlsx") as writer:
+    # save original data
+    df.to_excel(writer, sheet_name='original', index=False)
+    
+    # save boosted data
+    new_df.to_excel(writer, sheet_name='boosted', index=False)
+    
+    # save final data
+    final_df.to_excel(writer, sheet_name='final', index=False)
+
+print("done! saved to flow_results.xlsx")
