@@ -8,12 +8,12 @@ from sklearn.preprocessing import StandardScaler
 
 
 # SECTION 2 : Basic settings
-SEQ_LENGTH = 20  # How many past points to look at
+SEQ_LENGTH = 10  # How many past points to look at
 PRED_LENGTH = 5  # How many future points to predict
-HIDDEN_SIZE = 64  # Size of LSTM hidden layer
+HIDDEN_SIZE = 128  # Size of RNN hidden layer
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
-EPOCHS = 50
+EPOCHS = 100
 
 
 # SECTION 3 : Check if GPU is available
