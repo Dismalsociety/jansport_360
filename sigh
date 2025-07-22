@@ -1,0 +1,80 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# STEP 1: Load the original data
+print("Loading data...")
+df = pd.read_excel('stretched_training_data.xlsx')
+times = df['Time (s)'].values
+flows = df['Flow Rate (gpm)'].values
+
+# STEP 2: Create a sine wave
+# Frequency of sine wave (adjust this to change how fast it oscillates)
+SINE_FREQUENCY = .1  # Hz (10 cycles per second)
+
+# Create sine wave values
+sine_values = np.sin(2 * np.pi * SINE_FREQUENCY * times)
+
+# STEP 3: Use flow rate as amplitude
+# The sine wave will oscillate between 0 and the flow rate value
+new_flows = flows * sine_values
+
+# Make sure all values are positive (sine goes negative)
+# Option 1: Use absolute value
+new_flows = np.abs(new_flows)
+
+# Option 2: Shift sine to be between 0 and 1 instead of -1 to 1
+# Uncomment this if you prefer:
+# sine_values_positive = (sine_values + 1) / 2  # Now between 0 and 1
+# new_flows = flows * sine_values_positive
+
+# STEP 5: Save the new data
+new_df = pd.DataFrame({
+    'Time (s)': times,
+    'Flow Rate (gpm)': new_flows,
+})
+
+new_df.to_excel('sine_wave_training_data.xlsx', index=False)
+print("Saved to sine_wave_training_data.xlsx")
+
+# STEP 6: Plot to compare
+plt.figure(figsize=(15, 10))
+
+# Plot 1: Original flow rate
+plt.subplot(3, 1, 1)
+plt.plot(times[:2000], flows[:2000], 'b-')
+plt.title('Original Flow Rate')
+plt.xlabel('Time (s)')
+plt.ylabel('Flow Rate (gpm)')
+plt.grid(True)
+
+# Plot 2: Sine wave modulated flow
+plt.subplot(3, 1, 2)
+plt.plot(times[:2000], new_flows[:2000], 'r-')
+plt.title(f'Sine Wave Flow (Frequency = {SINE_FREQUENCY} Hz)')
+plt.xlabel('Time (s)')
+plt.ylabel('Flow Rate (gpm)')
+plt.grid(True)
+
+# Plot 3: Zoomed in view to see sine wave detail
+plt.subplot(3, 1, 3)
+zoom_start = 1000
+zoom_end = 1100
+plt.plot(times[zoom_start:zoom_end], flows[zoom_start:zoom_end], 'b-', label='Original', linewidth=2)
+plt.plot(times[zoom_start:zoom_end], new_flows[zoom_start:zoom_end], 'r-', label='Sine Wave', alpha=0.7)
+plt.title('Zoomed View - Sine Wave Detail')
+plt.xlabel('Time (s)')
+plt.ylabel('Flow Rate (gpm)')
+plt.legend()
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
+
+# STEP 7: Show statistics
+print(f"\nOriginal flow rate range: {flows.min():.1f} to {flows.max():.1f} gpm")
+print(f"Sine wave flow rate range: {new_flows.min():.1f} to {new_flows.max():.1f} gpm")
+print(f"Sine wave frequency: {SINE_FREQUENCY} Hz")
+print(f"Sine wave period: {1/SINE_FREQUENCY:.3f} seconds")
+
+print("\nDone! Use 'sine_wave_training_data.xlsx' in your neural network.")
