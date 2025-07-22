@@ -2,27 +2,25 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# STEP 1: Load the original data
+# STEP 1: Load original data
 print("Loading data...")
 df = pd.read_excel('stretched_training_data.xlsx')
 times = df['Time (s)'].values
 flows = df['Flow Rate (gpm)'].values
 
-# STEP 2: Create a sine wave
-# Frequency of sine wave (adjust this to change how fast it oscillates)
-SINE_FREQUENCY = .1  # Hz (10 cycles per second)
+# Create a sine wave (Hz)
+SINE_FREQUENCY = .1  
 
 # Create sine wave values
 sine_values = np.sin(2 * np.pi * SINE_FREQUENCY * times)
 
-# STEP 3: Use flow rate as amplitude
-# The sine wave will oscillate between 0 and the flow rate value
+# Use flow rate as amplitude
 new_flows = flows * sine_values
 
 # Use absolute value
 new_flows = np.abs(new_flows)
 
-# STEP 5: Save the new data
+# Save new data
 new_df = pd.DataFrame({
     'Time (s)': times,
     'Flow Rate (gpm)': new_flows,
