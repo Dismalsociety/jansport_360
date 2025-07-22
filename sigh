@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# STEP 1: Load original data
+# Load original data
 print("Loading data...")
 df = pd.read_excel('stretched_training_data.xlsx')
 times = df['Time (s)'].values
