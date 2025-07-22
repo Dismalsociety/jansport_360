@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# SECTION 1: Load the data
+# Load the data
 print("Loading data...")
 df = pd.read_excel('generated_training_data.xlsx')
 times = df['Time (s)'].values
@@ -11,14 +11,14 @@ flows = df['Flow Rate (gpm)'].values
 pressures = df['Predicted Pressure (psiA)'].values
 
 
-# SECTION 2: Find the peak threshold
+# Find the peak threshold
 mean_flow = np.mean(flows)
 std_flow = np.std(flows)
 peak_threshold = mean_flow + 0.5 * std_flow
 print(f"Peak threshold: {peak_threshold:.2f} gpm")
 
 
-# SECTION 3: Find all peaks
+# Find all peaks
 peak_regions = []
 in_peak = False
 peak_start = 0
@@ -34,7 +34,7 @@ for i in range(len(flows)):
 print(f"Found {len(peak_regions)} peaks")
 
 
-# SECTION 4: Make all peaks reach 103 gpm
+# Make all peaks reach 103 gpm
 PEAK_HEIGHT = 103
 modified_flows = flows.copy()
 
@@ -51,7 +51,7 @@ for start, end in peak_regions:
         modified_flows[i] = flows[i] * scale_factor
 
 
-# SECTION 5: Stretch peaks to be 5x longer
+# Stretch peaks to be 5x longer
 STRETCH_FACTOR = 5
 new_times = []
 new_flows = []
@@ -82,7 +82,7 @@ for i in range(len(times)):
         current_time = current_time + time_step
 
 
-# SECTION 6: Save the new data
+# Save the new data
 new_df = pd.DataFrame({
     'Time (s)': new_times,
     'Flow Rate (gpm)': new_flows
@@ -90,4 +90,3 @@ new_df = pd.DataFrame({
 
 new_df.to_excel('stretched_training_data.xlsx', index=False)
 print("Saved to stretched_training_data.xlsx")
-
