@@ -1,25 +1,27 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import interpolate
 
-# Load the data
+
+# SECTION 1: Load the data
+print("Loading data...")
 df = pd.read_excel('generated_training_data.xlsx')
 times = df['Time (s)'].values
 flows = df['Flow Rate (gpm)'].values
 pressures = df['Predicted Pressure (psiA)'].values
 
-# Find peaks (flow rates above mean + 0.5 * std deviation)
+
+# SECTION 2: Find the peak threshold
 mean_flow = np.mean(flows)
 std_flow = np.std(flows)
 peak_threshold = mean_flow + 0.5 * std_flow
-
 print(f"Peak threshold: {peak_threshold:.2f} gpm")
 
-# Find peak regions
+
+# SECTION 3: Find all peaks
 peak_regions = []
 in_peak = False
-peak_start = -1
+peak_start = 0
 
 for i in range(len(flows)):
     if flows[i] > peak_threshold and not in_peak:
@@ -29,149 +31,63 @@ for i in range(len(flows)):
         peak_regions.append((peak_start, i-1))
         in_peak = False
 
-# Handle case where data ends in a peak
-if in_peak:
-    peak_regions.append((peak_start, len(flows)-1))
+print(f"Found {len(peak_regions)} peaks")
 
-print(f"Found {len(peak_regions)} peak regions")
 
-# STRETCHING FACTOR - Change this to control how much to stretch peaks
-STRETCH_FACTOR = 3  # Makes peaks 3x longer
+# SECTION 4: Make all peaks reach 103 gpm
+PEAK_HEIGHT = 103
+modified_flows = flows.copy()
 
-# Create new stretched data
+for start, end in peak_regions:
+    # Get the peak
+    peak_values = flows[start:end+1]
+    peak_max = np.max(peak_values)
+    
+    # Scale it to reach 103
+    scale_factor = PEAK_HEIGHT / peak_max
+    
+    # Apply scaling
+    for i in range(start, end+1):
+        modified_flows[i] = flows[i] * scale_factor
+
+
+# SECTION 5: Stretch peaks to be 5x longer
+STRETCH_FACTOR = 5
 new_times = []
 new_flows = []
 new_pressures = []
+
 current_time = 0
-
 for i in range(len(times)):
-    # Check if we're in a peak region
-    is_in_peak = False
-    for start, end in peak_regions:
-        if start <= i <= end:
-            is_in_peak = True
-            break
+    # Add this point
+    new_times.append(current_time)
+    new_flows.append(modified_flows[i])
+    new_pressures.append(pressures[i])
     
-    if i == 0:
-        new_times.append(current_time)
-        new_flows.append(flows[i])
-        new_pressures.append(pressures[i])
-    else:
-        # Calculate time increment
-        time_increment = times[i] - times[i-1]
+    # Calculate time to next point
+    if i < len(times) - 1:
+        time_step = times[i+1] - times[i]
         
-        # Stretch time if in peak
-        if is_in_peak:
-            time_increment *= STRETCH_FACTOR
+        # Check if we're in a peak
+        in_peak = False
+        for start, end in peak_regions:
+            if start <= i <= end:
+                in_peak = True
+                break
         
-        current_time += time_increment
-        new_times.append(current_time)
-        new_flows.append(flows[i])
-        new_pressures.append(pressures[i])
+        # Stretch if in peak
+        if in_peak:
+            time_step = time_step * STRETCH_FACTOR
+            
+        current_time = current_time + time_step
 
-# Convert to numpy arrays
-new_times = np.array(new_times)
-new_flows = np.array(new_flows)
-new_pressures = np.array(new_pressures)
 
-# Option 1: Just use the stretched data as-is
-# This keeps the same number of points but stretches the time
-
-# Option 2: Resample to uniform time steps (recommended for neural networks)
-# Create uniform time grid
-total_time = new_times[-1]
-num_points = len(times)  # Keep same number of points
-uniform_times = np.linspace(0, total_time, num_points)
-
-# Interpolate flow and pressure to uniform grid
-flow_interp = interpolate.interp1d(new_times, new_flows, kind='linear', fill_value='extrapolate')
-pressure_interp = interpolate.interp1d(new_times, new_pressures, kind='linear', fill_value='extrapolate')
-
-uniform_flows = flow_interp(uniform_times)
-uniform_pressures = pressure_interp(uniform_times)
-
-# Save the stretched data
-df_stretched = pd.DataFrame({
-    'Time (s)': uniform_times,
-    'Flow Rate (gpm)': uniform_flows,
-    'Predicted Pressure (psiA)': uniform_pressures
+# SECTION 6: Save the new data
+new_df = pd.DataFrame({
+    'Time (s)': new_times,
+    'Flow Rate (gpm)': new_flows
 })
 
-df_stretched.to_excel('stretched_training_data.xlsx', index=False)
-print("Saved stretched data to 'stretched_training_data.xlsx'")
+new_df.to_excel('stretched_training_data.xlsx', index=False)
+print("Saved to stretched_training_data.xlsx")
 
-# Visualize the difference
-plt.figure(figsize=(15, 10))
-
-# Plot 1: Original data (first 1000 points for clarity)
-plt.subplot(2, 2, 1)
-plot_range = 1000
-plt.plot(times[:plot_range], flows[:plot_range], 'b-', alpha=0.7)
-plt.axhline(y=peak_threshold, color='r', linestyle='--', label='Peak threshold')
-plt.title('Original Data (First 1000 points)')
-plt.xlabel('Time (s)')
-plt.ylabel('Flow Rate (gpm)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-# Plot 2: Stretched data (equivalent time range)
-plt.subplot(2, 2, 2)
-# Find equivalent range in stretched data
-time_limit = times[plot_range]
-mask = uniform_times <= time_limit * 1.5  # Show a bit more to see stretching effect
-plt.plot(uniform_times[mask], uniform_flows[mask], 'g-', alpha=0.7)
-plt.axhline(y=peak_threshold, color='r', linestyle='--', label='Peak threshold')
-plt.title('Stretched Data (Same time period)')
-plt.xlabel('Time (s)')
-plt.ylabel('Flow Rate (gpm)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-# Plot 3: Zoom in on a single peak (original)
-plt.subplot(2, 2, 3)
-# Find first significant peak
-peak_idx = peak_regions[0]
-peak_start, peak_end = peak_idx
-margin = 100  # Points before and after peak
-start_idx = max(0, peak_start - margin)
-end_idx = min(len(times)-1, peak_end + margin)
-
-plt.plot(times[start_idx:end_idx], flows[start_idx:end_idx], 'b-', linewidth=2)
-plt.axhline(y=peak_threshold, color='r', linestyle='--', label='Peak threshold')
-plt.fill_between(times[peak_start:peak_end+1], 0, flows[peak_start:peak_end+1], 
-                 alpha=0.3, color='yellow', label='Peak region')
-plt.title('Original: Zoomed Peak')
-plt.xlabel('Time (s)')
-plt.ylabel('Flow Rate (gpm)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-# Plot 4: Same peak in stretched data
-plt.subplot(2, 2, 4)
-# Find corresponding time range in stretched data
-orig_start_time = times[start_idx]
-orig_end_time = times[end_idx]
-# In stretched data, find these times
-stretched_mask = (uniform_times >= orig_start_time) & (uniform_times <= orig_end_time * 2)
-plt.plot(uniform_times[stretched_mask], uniform_flows[stretched_mask], 'g-', linewidth=2)
-plt.axhline(y=peak_threshold, color='r', linestyle='--', label='Peak threshold')
-plt.title('Stretched: Same Peak (3x longer)')
-plt.xlabel('Time (s)')
-plt.ylabel('Flow Rate (gpm)')
-plt.legend()
-plt.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('peak_stretching_comparison.png', dpi=300, bbox_inches='tight')
-plt.show()
-
-# Print statistics
-print(f"\nOriginal data duration: {times[-1]:.2f} seconds")
-print(f"Stretched data duration: {uniform_times[-1]:.2f} seconds")
-print(f"Average peak duration (original): {np.mean([(times[end]-times[start]) for start, end in peak_regions]):.3f} seconds")
-print(f"Average peak duration (stretched): ~{STRETCH_FACTOR * np.mean([(times[end]-times[start]) for start, end in peak_regions]):.3f} seconds")
-
-print("\nTo use this in your neural network:")
-print("1. Change the filename in your code from 'generated_training_data.xlsx' to 'stretched_training_data.xlsx'")
-print("2. The model will now spend more time learning from peak regions!")
-print(f"3. To change stretching amount, modify STRETCH_FACTOR (currently {STRETCH_FACTOR})")
