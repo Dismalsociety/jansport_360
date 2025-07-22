@@ -102,11 +102,6 @@ loss_function = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
 
-# Print model info
-total_params = sum(p.numel() for p in model.parameters())
-print(f"\nModel has {total_params:,} parameters")
-
-
 # SECTION 10 : Training loop
 print("\nStarting training...")
 train_losses = []
