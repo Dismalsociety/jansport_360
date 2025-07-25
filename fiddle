@@ -18,12 +18,10 @@ fidelity_score = max(0, min(100, fidelity_score))
 
 print(f"Fidelity: {fidelity_score:.1f}%")
 
-# SECTION 13 : Evaluation Plots
-# Plot 1: Training loss
-plt.figure(figsize=(10, 5))
-plt.subplot(1, 2, 1)
-plt.plot(train_losses)
-plt.title('Training Loss Over Time')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.grid(True, alpha=0.3)
+
+
+# Calculate Fidelity Score
+correlation = np.corrcoef(predictions_actual.flatten(), targets_actual.flatten())[0, 1]
+fidelity_score = correlation * 100
+
+print(f"Fidelity Score: {fidelity_score:.1f}%")
