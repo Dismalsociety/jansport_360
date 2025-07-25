@@ -1,3 +1,11 @@
+# SECTION 12 : Denormalize to get actual pressure values
+pressure_mean = scaler.mean_[1]
+pressure_std = scaler.scale_[1]
+
+predictions_actual = predictions_array * pressure_std + pressure_mean
+targets_actual = targets_array * pressure_std + pressure_mean
+
+
 # Calculate fidelity score
 errors = np.abs(predictions_actual - targets_actual)
 mean_error = np.mean(errors)
@@ -9,3 +17,13 @@ fidelity_score = (1 - mean_error / pressure_range) * 100
 fidelity_score = max(0, min(100, fidelity_score)) 
 
 print(f"Fidelity: {fidelity_score:.1f}%")
+
+# SECTION 13 : Evaluation Plots
+# Plot 1: Training loss
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.plot(train_losses)
+plt.title('Training Loss Over Time')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.grid(True, alpha=0.3)
