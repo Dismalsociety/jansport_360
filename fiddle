@@ -1,0 +1,11 @@
+# Calculate fidelity score
+errors = np.abs(predictions_actual - targets_actual)
+mean_error = np.mean(errors)
+max_pressure = np.max(targets_actual)
+min_pressure = np.min(targets_actual)
+pressure_range = max_pressure - min_pressure
+
+fidelity_score = (1 - mean_error / pressure_range) * 100
+fidelity_score = max(0, min(100, fidelity_score)) 
+
+print(f"Fidelity: {fidelity_score:.1f}%")
