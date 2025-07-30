@@ -22,3 +22,31 @@ Focusing on the most relevant historical data
 Example:
 If pressure typically dips 5 time steps after a flow rate spike, the attention mechanism can learn to "pay attention" to what happened 5 steps ago, even if the LSTM's memory has faded.
 Think of it like having a highlighter that marks the most important parts of the history for making predictions.
+
+Input → LSTM1 → LSTM2 → Attention1 (focuses on important timesteps)
+                   ↓
+                LSTM3 → LSTM4 → Attention2 (refocuses again)
+                           ↓
+                       LSTM5 → LSTM6 → Attention3 (final focus)
+                                  ↓
+                               Output
+
+Why add attention?
+
+LSTMs can struggle with long sequences (15+ steps)
+Important patterns might be too far apart
+The "forgetting problem" - crucial information gets diluted
+
+So yes, LSTMs have memory, but attention gives them a "photographic memory" that can instantly recall any previous moment without degradation. It's like the difference between trying to remember something through a game of telephone vs. having direct access to the original message.
+
+LSTM Memory:
+
+Sequential memory: Information passes through hidden states step by step
+Can forget: Important information from early steps can fade/get overwritten
+Fixed flow: Must go through every step in sequence (1→2→3→4...)
+
+LSTM + Attention:
+
+Direct access: Can look directly at ANY previous time step
+Selective focus: Chooses which time steps are most relevant
+Parallel connections: Can connect step 1 directly to step 10
