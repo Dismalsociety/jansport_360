@@ -1,3 +1,5 @@
+
+
 # Simple Attention Layer
 class SimpleAttention(nn.Module):
     def __init__(self, hidden_size):
@@ -58,28 +60,4 @@ class MyLSTMModel(nn.Module):
         
         # Apply attention after last layer
         out = self.attention3(out)
-        
-
-# Custom loss function for dips
-def my_custom_loss(predictions, targets):
-    # Normal loss
-    normal_loss = nn.MSELoss()(predictions, targets)
-    
-    # Check for pressure dips
-    target_pressures = targets[:, :, 1].cpu().detach().numpy()
-    actual_pressures = pressure_scaler.inverse_transform(
-        target_pressures.reshape(-1, 1)
-    ).reshape(target_pressures.shape)
-    
-    # Find dips below -5
-    actual_pressures = torch.tensor(actual_pressures, device=targets.device)
-    dip_mask = actual_pressures < -5.0
-    
-    # Extra penalty for dips
-    if dip_mask.any():
-        dip_penalty = torch.where(dip_mask, 3.0, 1.0)
-        extra_loss = dip_penalty * (predictions[:, :, 1] - targets[:, :, 1])**2
-        return normal_loss + extra_loss.mean()
-    else:
-        return normal_loss
-
+   
