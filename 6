@@ -1,0 +1,85 @@
+# Simple Attention Layer
+class SimpleAttention(nn.Module):
+    def __init__(self, hidden_size):
+        super(SimpleAttention, self).__init__()
+        self.hidden_size = hidden_size
+        
+        # Simple linear layers for attention
+        self.attention = nn.Linear(hidden_size, hidden_size)
+        self.context = nn.Linear(hidden_size, 1, bias=False)
+        
+    def forward(self, lstm_output):
+        # Calculate attention weights
+        attention_weights = self.attention(lstm_output)
+        attention_weights = torch.tanh(attention_weights)
+        attention_weights = self.context(attention_weights)
+        attention_weights = F.softmax(attention_weights, dim=1)
+        
+        # Apply attention
+        weighted_output = lstm_output * attention_weights
+        
+        return weighted_output
+
+
+# Model with 6 LSTM layers and attention
+class MyLSTMModel(nn.Module):
+    def __init__(self):
+        super(MyLSTMModel, self).__init__()
+        
+        # 6 LSTM layers
+        self.lstm1 = nn.LSTM(2, 64, batch_first=True)
+        self.lstm2 = nn.LSTM(64, 128, batch_first=True)
+        self.lstm3 = nn.LSTM(128, 256, batch_first=True)
+        self.lstm4 = nn.LSTM(256, 128, batch_first=True)
+        self.lstm5 = nn.LSTM(128, 64, batch_first=True)
+        self.lstm6 = nn.LSTM(64, 2, batch_first=True)
+        
+        # Add simple attention after some layers
+        self.attention1 = SimpleAttention(128)
+        self.attention2 = SimpleAttention(128)
+        self.attention3 = SimpleAttention(2)
+        
+    def forward(self, x):
+        # Pass through LSTM layers
+        out, _ = self.lstm1(x)
+        out, _ = self.lstm2(out)
+        
+        # Apply attention after 2nd layer
+        out = self.attention1(out)
+        
+        out, _ = self.lstm3(out)
+        out, _ = self.lstm4(out)
+        
+        # Apply attention after 4th layer
+        out = self.attention2(out)
+        
+        out, _ = self.lstm5(out)
+        out, _ = self.lstm6(out)
+        
+        # Apply attention after last layer
+        out = self.attention3(out)
+        
+
+# Custom loss function for dips
+def my_custom_loss(predictions, targets):
+    # Normal loss
+    normal_loss = nn.MSELoss()(predictions, targets)
+    
+    # Check for pressure dips
+    target_pressures = targets[:, :, 1].cpu().detach().numpy()
+    actual_pressures = pressure_scaler.inverse_transform(
+        target_pressures.reshape(-1, 1)
+    ).reshape(target_pressures.shape)
+    
+    # Find dips below -5
+    actual_pressures = torch.tensor(actual_pressures, device=targets.device)
+    dip_mask = actual_pressures < -5.0
+    
+    # Extra penalty for dips
+    if dip_mask.any():
+        dip_penalty = torch.where(dip_mask, 3.0, 1.0)
+        extra_loss = dip_penalty * (predictions[:, :, 1] - targets[:, :, 1])**2
+        return normal_loss + extra_loss.mean()
+    else:
+        return normal_loss
+
