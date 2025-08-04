@@ -98,7 +98,7 @@ class Model(nn.Module):
 
 model = Model().to(device)
 
-# Loss function (MSE) and Adam (Adam)
+# Loss function (MSE) and optimizer (Adam)
 MSE = nn.MSELoss()
 Adam = torch.optim.Adam(model.parameters(), lr = learning_rate)
 
@@ -171,8 +171,8 @@ ss_tot = np.sum((actuals_real - np.mean(actuals_real)) ** 2)
 r_squared = 1 - (ss_res / ss_tot)
 
 print(f"\nTrend Fidelity:")
-print(f"Correlation: {correlation:.4f} (p-value: {p_value:.2e})")
-print(f"R-squared: {r_squared:.4f}")
+print(f"  Correlation: {correlation:.4f}")
+print(f"  R-squared: {r_squared:.4f}")
 
 # Make plots
 plt.figure(figsize=(10, 5))
