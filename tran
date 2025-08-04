@@ -69,15 +69,13 @@ class Model(nn.Module):
             d_model=64,
             nhead=4,
             dim_feedforward=128,
-            batch_first=True
-        )
+            batch_first=True)
 
         # LSTM
         self.lstm = nn.LSTM(
             input_size = 64, 
             hidden_size = 128, 
-            batch_first=True
-        )
+            batch_first=True )
 
         # Output layers
         self.fc1 = nn.Linear(128, 32)
