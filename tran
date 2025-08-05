@@ -1,61 +1,3 @@
-import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt 
-import pandas as pd 
-import numpy as np
-from sklearn.preprocessing import StandardScaler
-from scipy.stats import pearsonr
-import math
-
-# Parameters
-sequence_length = 10    # How many past points to use
-predict_length = 5     # How many future points to predict
-batch_size = 32     
-learning_rate = 0.001 
-epochs = 100
-
-# Use GPU instead of CPU
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# Load data
-print("Loading data...")
-df = pd.read_excel('generated_training_data_2.xlsx')
-flow = df['FLow Rate'].values 
-pressure = df['Pressure'].values 
-
-# Combine our two features together 
-data = np.column_stack([flow, pressure])
-
-#Normalize data
-scaler = StandardScaler()
-data_normalized = scaler.fit_transform(data)
-
-# Create sliding windows for training 
-print("Creating sequences...")
-X_data = []
-Y_data = []
-
-for i in range(len(data_normalized) - sequence_length - predict_length + 1):
-    
-    input_seq = data_normalized[i:i+sequence_length]
-    X_data.append(input_seq)
-
-    target = data_normalized[i+sequence_length:i+sequence_length+predict_length, 1]
-    Y_data.append(target)
-
-X_data = np.array(X_data)
-Y_data = np.array(Y_data)
-
-# Split into train and test
-split = int(0.8 * len(X_data))
-X_train = torch.FloatTensor(X_data[:split])
-Y_train = torch.FloatTensor(Y_data[:split])
-X_test = torch.FloatTensor(X_data[split:])
-Y_test = torch.FloatTensor(Y_data[split:])
-
-print(f"Training samples: {len(X_train)}")
-print(f"Test samples: {len(X_test)}")
-
 # Define Model 
 class Model(nn.Module):
     def __init__(self):
@@ -71,14 +13,15 @@ class Model(nn.Module):
             dim_feedforward=128,
             batch_first=True)
 
-        # LSTM
+        # Bidirectional LSTM
         self.lstm = nn.LSTM(
             input_size = 64, 
-            hidden_size = 128, 
+            hidden_size = 128,
+            bidirectional = True, 
             batch_first=True )
 
-        # Output layers
-        self.fc1 = nn.Linear(128, 32)
+        # Output layers 
+        self.fc1 = nn.Linear(256, 32)
         self.fc2 = nn.Linear(32, predict_length)
         self.relu = nn.ReLU()
 
@@ -87,7 +30,9 @@ class Model(nn.Module):
         x = self.input_layer(x)
         x = self.transformer(x)
         lstm_out, (hidden, cell) = self.lstm(x)
-        last_hidden = hidden[0]
+        hidden_forward = hidden[0]
+        hidden_backward = hidden[1]
+        last_hidden = torch.cat((hidden_forward, hidden_backward), dim=1)
         x = self.fc1(last_hidden)
         x = self.relu(x)
         x = self.fc2(x)
@@ -95,105 +40,3 @@ class Model(nn.Module):
         return x
 
 model = Model().to(device)
-
-# Loss function (MSE) and optimizer (Adam)
-MSE = nn.MSELoss()
-Adam = torch.optim.Adam(model.parameters(), lr = learning_rate)
-
-# Training 
-print("\nTraining...")
-train_losses = []
-
-for epoch in range(epochs):
-    total_loss = 0
-    num_batches = 0
-
-    # Train on batches
-    for i in range(0, len(X_train), batch_size):
-        # Get batch
-        batch_x = X_train[i:i+batch_size].to(device)
-        batch_y = Y_train[i:i+batch_size].to(device)
-    
-        # Forward pass
-        outputs = model(batch_x)
-        loss = MSE(outputs, batch_y)
-        
-        # Backward pass
-        Adam.zero_grad()
-        loss.backward()
-        Adam.step()
-        total_loss += loss.item()
-        num_batches += 1
-    
-    # Average loss
-    avg_loss = total_loss / num_batches
-    train_losses.append(avg_loss)
-    
-    # Print every 10 epochs
-    if (epoch + 1) % 10 == 0:
-        print(f'Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}')
-
-# Testing
-print("\nTesting...")
-model.eval()
-
-# Predictions 
-all_predictions = []
-all_actuals = []
-
-with torch.no_grad():
-    for i in range(0, len(X_test), batch_size):
-        batch_x = X_test[i:i+batch_size].to(device)
-        batch_y = Y_test[i:i+batch_size]
-        
-        predictions = model(batch_x)
-        
-        #Store results here
-        all_predictions.append(predictions.cpu().numpy())
-        all_actuals.append(batch_y.numpy())
-
-predictions = np.vstack(all_predictions)
-actuals = np.vstack(all_actuals)
-
-# Convert values back to original scale
-pressure_mean = scaler.mean_[1]
-pressure_std = scaler.scale_[1]
-
-predictions_real = predictions * pressure_std + pressure_mean
-actuals_real = actuals * pressure_std + pressure_mean
-
-# Calculate fidelity metrics
-correlation, p_value = pearsonr(predictions_real.flatten(), actuals_real.flatten())
-ss_res = np.sum((actuals_real - predictions_real) ** 2)
-ss_tot = np.sum((actuals_real - np.mean(actuals_real)) ** 2)
-r_squared = 1 - (ss_res / ss_tot)
-
-print(f"\nTrend Fidelity:")
-print(f"  Correlation: {correlation:.4f}")
-print(f"  R-squared: {r_squared:.4f}")
-
-# Make plots
-plt.figure(figsize=(10, 5))
-
-# Plot 1: Training loss
-plt.subplot(1, 2, 1)
-plt.plot(train_losses)
-plt.title('Training Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.grid(True)
-
-# Plot 2: Predictions vs Actual
-plt.subplot(1, 2, 2)
-plt.plot(actuals_real[:, 0], label='Actual')
-plt.plot(predictions_real[:, 0], label='Predicted')
-plt.title('Predictions vs Actual')
-plt.xlabel('Test Sample')
-plt.ylabel('Pressure (psiA)')
-plt.legend()
-plt.grid(True)
-
-plt.tight_layout()
-plt.show()
-
-print("\nDone!")
