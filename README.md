@@ -27,3 +27,5 @@ to summarize, we made the model simpler, we made sure there was no data leakage,
 
 I had diverging loss curves. Want converging ones where validation loss closely tracks training loss.
 
+Order of training examples SHUFFLED
+
