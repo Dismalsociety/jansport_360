@@ -25,3 +25,5 @@ Simple Model + Clean Splits + Triple Regularization = Good Generalization
 
 to summarize, we made the model simpler, we made sure there was no data leakage,  we included regularlization by adding noise, drop, and weight decay
 
+I had diverging loss curves. Want converging ones where validation loss closely tracks training loss.
+
