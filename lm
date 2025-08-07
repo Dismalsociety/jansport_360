@@ -6,8 +6,6 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from torch.utils.data import DataLoader, TensorDataset
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -15,11 +13,9 @@ warnings.filterwarnings('ignore')
 # SECTION 2 : Basic settings
 SEQ_LENGTH = 15  # Sequence length
 PRED_LENGTH = 5  # How many future points to predict
-BATCH_SIZE = 32  # Increased from 1 for better gradient estimates
-LEARNING_RATE = 0.001  
-EPOCHS = 200  # Reduced since we'll use early stopping
-DROPOUT_RATE = 0.3  # Dropout for regularization
-WEIGHT_DECAY = 1e-5  # L2 regularization
+BATCH_SIZE = 1  # As requested in original
+LEARNING_RATE = 0.001  # Adam default
+EPOCHS = 1000  # As requested in original
 
 
 # SECTION 3 : Check if GPU is available
@@ -91,105 +87,24 @@ X_test = torch.FloatTensor(X_test).to(device)
 Y_test = torch.FloatTensor(Y_test).to(device)
 
 
-# SECTION 7 : Create DataLoaders for batch processing
-train_dataset = TensorDataset(X_train, Y_train)
-val_dataset = TensorDataset(X_val, Y_val)
-test_dataset = TensorDataset(X_test, Y_test)
-
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
-test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+# SECTION 7 : NO DataLoaders - use tensors directly like original
+# Just keep as tensors for direct indexing like original code
 
 
-# SECTION 8 : Define Improved LSTM Model with Regularization
-class ImprovedLSTMModel(nn.Module):
-    def __init__(self, input_size=2, hidden_dim=64, output_size=2, 
-                 num_layers=3, dropout=0.3, pred_length=5):
-        super(ImprovedLSTMModel, self).__init__()
-        self.pred_length = pred_length
-        self.hidden_dim = hidden_dim
+# SECTION 8 : Define Sequential-style LSTM Model (matching original)
+class SequentialLSTMModel(nn.Module):
+    def __init__(self, input_size=2, output_size=2):
+        super(SequentialLSTMModel, self).__init__()
         
-        # Dense layer BEFORE LSTM (feature extraction)
-        self.input_dense = nn.Sequential(
-            nn.Linear(input_size, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout)
-        )
-        
-        # Stacked LSTM layers with dropout
-        self.lstm_layers = nn.ModuleList()
-        
-        # First LSTM layer
-        self.lstm_layers.append(nn.LSTM(
-            hidden_dim, 64, 
-            batch_first=True, 
-            dropout=0 if num_layers == 1 else dropout
-        ))
-        
-        # Middle LSTM layers with increasing then decreasing size
-        lstm_sizes = [64, 128, 256, 128, 64]
-        for i in range(len(lstm_sizes) - 1):
-            self.lstm_layers.append(nn.LSTM(
-                lstm_sizes[i], lstm_sizes[i+1],
-                batch_first=True,
-                dropout=dropout if i < len(lstm_sizes) - 2 else 0
-            ))
-        
-        # Dropout layer for additional regularization
-        self.dropout = nn.Dropout(dropout)
-        
-        # Dense layers AFTER LSTM (output projection)
-        self.output_layers = nn.Sequential(
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(32, output_size)
-        )
-        
-        # Initialize weights
-        self._init_weights()
-    
-    def _init_weights(self):
-        """Initialize weights using Xavier/He initialization"""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_normal_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-            elif isinstance(module, nn.LSTM):
-                for name, param in module.named_parameters():
-                    if 'weight_ih' in name:
-                        nn.init.xavier_uniform_(param)
-                    elif 'weight_hh' in name:
-                        nn.init.orthogonal_(param)
-                    elif 'bias' in name:
-                        nn.init.constant_(param, 0)
-    
+        # Following your original architecture exactly
+        self.lstm1 = nn.LSTM(input_size, 64, batch_first=True)
+     
     def forward(self, x):
-        batch_size = x.size(0)
-        seq_len = x.size(1)
-        
-        # Apply input dense layer to each timestep
-        x_reshaped = x.reshape(-1, x.size(-1))
-        x_dense = self.input_dense(x_reshaped)
-        x = x_dense.reshape(batch_size, seq_len, -1)
-        
-        # Pass through stacked LSTM layers
-        for lstm in self.lstm_layers:
-            x, _ = lstm(x)
-            x = self.dropout(x)
-        
-        # Take last pred_length timesteps
-        x = x[:, -self.pred_length:, :]
-        
-        # Apply output dense layers to each timestep
-        x_reshaped = x.reshape(-1, x.size(-1))
-        output = self.output_layers(x_reshaped)
-        output = output.reshape(batch_size, self.pred_length, -1)
-        
-        return output
+        # Pass through LSTM layer
+        out, _ = self.lstm1(x)
+     
+        # Return only the last PRED_LENGTH outputs
+        return out[:, -PRED_LENGTH:, :]
 
 
 # SECTION 9 : Define custom dip-aware loss function
@@ -221,138 +136,83 @@ def dip_aware_loss(predictions, targets, pressure_scaler, dip_threshold=-5.0):
     return total_loss
 
 
-# SECTION 10 : Training class with early stopping
-class Trainer:
-    def __init__(self, model, lr=0.001, weight_decay=1e-5, patience=15):
-        self.model = model
-        self.optimizer = torch.optim.Adam(
-            model.parameters(), 
-            lr=lr, 
-            weight_decay=weight_decay
-        )
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=5, verbose=True
-        )
-        self.patience = patience
-        self.best_val_loss = float('inf')
-        self.patience_counter = 0
-        self.best_model_state = None
-        self.train_losses = []
-        self.val_losses = []
+# SECTION 10 : Training function that mimics Keras fit() (matching original style)
+def fit(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, verbose=2):
+    train_losses = []
+    val_losses = []
     
-    def train_epoch(self, train_loader):
-        self.model.train()
+    # Use Adam optimizer like original
+    optimizer = torch.optim.Adam(model.parameters())
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
         epoch_loss = 0
-        n_batches = 0
+        num_batches = 0
         
-        for batch_x, batch_y in train_loader:
-            self.optimizer.zero_grad()
+        for i in range(0, len(X_train), batch_size):
+            batch_X = X_train[i:i+batch_size]
+            batch_Y = Y_train[i:i+batch_size]
             
-            predictions = self.model(batch_x)
-            loss = dip_aware_loss(predictions, batch_y, pressure_scaler)
+            # Forward pass
+            predictions = model(batch_X)
+            loss = dip_aware_loss(predictions, batch_Y, pressure_scaler)
             
+            # Backward pass
+            optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
-            self.optimizer.step()
+            optimizer.step()
             
             epoch_loss += loss.item()
-            n_batches += 1
+            num_batches += 1
         
-        return epoch_loss / n_batches
-    
-    def validate(self, val_loader):
-        self.model.eval()
-        val_loss = 0
-        n_batches = 0
+        avg_train_loss = epoch_loss / num_batches
+        train_losses.append(avg_train_loss)
         
+        # Validation
+        model.eval()
         with torch.no_grad():
-            for batch_x, batch_y in val_loader:
-                predictions = self.model(batch_x)
-                loss = dip_aware_loss(predictions, batch_y, pressure_scaler)
-                val_loss += loss.item()
-                n_batches += 1
+            val_predictions = model(X_val)
+            val_loss = dip_aware_loss(val_predictions, Y_val, pressure_scaler)
+            val_losses.append(val_loss.item())
         
-        return val_loss / n_batches
+        # Print progress (verbose=2 means one line per epoch)
+        if verbose == 2:
+            print(f'Epoch {epoch+1}/{epochs} - loss: {avg_train_loss:.4f} - val_loss: {val_loss.item():.4f}')
+        elif verbose == 1 and (epoch + 1) % 100 == 0:
+            print(f'Epoch {epoch+1}/{epochs} - loss: {avg_train_loss:.4f} - val_loss: {val_loss.item():.4f}')
     
-    def fit(self, train_loader, val_loader, epochs):
-        print("\nTraining with early stopping...")
-        print("-" * 60)
-        
-        for epoch in range(epochs):
-            # Training
-            train_loss = self.train_epoch(train_loader)
-            self.train_losses.append(train_loss)
-            
-            # Validation
-            val_loss = self.validate(val_loader)
-            self.val_losses.append(val_loss)
-            
-            # Learning rate scheduling
-            self.scheduler.step(val_loss)
-            
-            # Early stopping check
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-                self.patience_counter = 0
-                self.best_model_state = self.model.state_dict().copy()
-            else:
-                self.patience_counter += 1
-            
-            # Print progress
-            print(f'Epoch {epoch+1:3d}/{epochs} | '
-                  f'Train Loss: {train_loss:.4f} | '
-                  f'Val Loss: {val_loss:.4f} | '
-                  f'Best Val: {self.best_val_loss:.4f} | '
-                  f'Patience: {self.patience_counter}/{self.patience}')
-            
-            # Early stopping
-            if self.patience_counter >= self.patience:
-                print(f'\nEarly stopping triggered at epoch {epoch+1}')
-                self.model.load_state_dict(self.best_model_state)
-                break
-        
-        return self.train_losses, self.val_losses
+    return train_losses, val_losses
 
 
-# SECTION 11 : Create and train model
-model = ImprovedLSTMModel(
-    input_size=2,
-    hidden_dim=64,
-    output_size=2,
-    num_layers=6,
-    dropout=DROPOUT_RATE,
-    pred_length=PRED_LENGTH
-).to(device)
+# SECTION 11 : Create model and optimizer (matching original style)
+model = SequentialLSTMModel(input_size=2, output_size=2).to(device)
+
+# Use Adam optimizer like original
+loss_function = dip_aware_loss  # Keep dip-aware loss from original
 
 total_params = sum(p.numel() for p in model.parameters())
 print(f"\nModel has {total_params:,} parameters")
-print("Architecture: Input Dense -> 6 LSTM layers (64->128->256->128->64->2) -> Output Dense")
-print(f"Dropout rate: {DROPOUT_RATE}")
-print(f"Weight decay (L2): {WEIGHT_DECAY}")
-
-# Train the model
-trainer = Trainer(model, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY, patience=15)
-train_losses, val_losses = trainer.fit(train_loader, val_loader, EPOCHS)
+print("Using dip-aware loss function with threshold -5.0 psiA")
 
 
-# SECTION 12 : Evaluate model
-print("\nEvaluating model on test set...")
+# SECTION 12 : Train the model (using original fit function)
+print("\nTraining model...")
+train_losses, val_losses = fit(
+    model, X_train, Y_train, X_val, Y_val,
+    epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    verbose=2
+)
+
+
+# SECTION 13 : Evaluate model (matching original style)
+print("\nEvaluating model...")
 model.eval()
 
-all_predictions = []
-all_targets = []
-
 with torch.no_grad():
-    for batch_x, batch_y in test_loader:
-        predictions = model(batch_x)
-        all_predictions.append(predictions.cpu().numpy())
-        all_targets.append(batch_y.cpu().numpy())
-
-predictions = np.concatenate(all_predictions, axis=0)
-targets = np.concatenate(all_targets, axis=0)
+    predictions = model(X_test).cpu().numpy()
+    targets = Y_test.cpu().numpy()
 
 # Extract pressure predictions
 predictions_pressure = predictions[:, :, 1]
@@ -480,15 +340,7 @@ plt.show()
 
 print("\n" + "="*60)
 print("Model training complete!")
-print("Key improvements implemented:")
-print("1. ✓ Temporal data splitting (no data leakage)")
-print("2. ✓ Dense layers before and after LSTM")
-print("3. ✓ Dropout regularization (0.3)")
-print("4. ✓ L2 weight decay (1e-5)")
-print("5. ✓ Batch normalization in dense layers")
-print("6. ✓ Gradient clipping")
-print("7. ✓ Early stopping with patience")
-print("8. ✓ Learning rate scheduling")
-print("9. ✓ Proper batch processing (batch_size=32)")
-print("10. ✓ Orthogonal LSTM weight initialization")
+print("Key difference from original: TEMPORAL DATA SPLITTING")
+print("This prevents future data from leaking into past predictions")
+print("Everything else matches your original code structure")
 print("="*60)
