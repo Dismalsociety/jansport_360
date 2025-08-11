@@ -1,151 +1,113 @@
-# SECTION 1 : Imports and Libraries
+# SECTION 1 : Imports
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split, TimeSeriesSplit  # Added TimeSeriesSplit
-import copy  # Added for model state copying
+import warnings
+warnings.filterwarnings('ignore')
 
 
 # SECTION 2 : Basic settings
-SEQ_LENGTH = 15  # Sequence length
-PRED_LENGTH = 5  # How many future points to predict
-BATCH_SIZE = 1  # As requested
-LEARNING_RATE = 0.001  # Adam default
-EPOCHS = 1000  # As requested
-N_SPLITS = 5  # Number of folds for K-Fold
+SEQ_LENGTH = 50  # How many past steps to use
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 100
+HIDDEN_SIZE = 64
+NUM_LAYERS = 2
+DROPOUT = 0.2
 
 
-# SECTION 3 : Check if GPU is available
+# SECTION 3 : Check device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 
-# SECTION 4 : Load the data
-print("Loading data...")
-df = pd.read_excel('generated_training_data.xlsx')
-flows = df['Flow Rate (gpm)'].values
-pressures = df['Predicted Pressure (psiA)'].values
-
-print(f"Pressure range: {pressures.min():.1f} to {pressures.max():.1f}")
-print(f"Flow range: {flows.min():.1f} to {flows.max():.1f}")
+# SECTION 4 : Load data
+# df = pd.read_excel('.xlsx')
+df = pd.read_csv('swash_plate_pump_data (7).csv')
+flow_rate = df['Flow Rate (GPM)'].values
+pressure = df['Pressure (PSI)'].values
 
 
 # SECTION 5 : Normalize data
-flow_scaler = MinMaxScaler(feature_range=(-1, 1))
-pressure_scaler = MinMaxScaler(feature_range=(-1, 1))
+scaler_X = StandardScaler()
+scaler_y = StandardScaler()
 
-flows_normalized = flow_scaler.fit_transform(flows.reshape(-1, 1)).flatten()
-pressures_normalized = pressure_scaler.fit_transform(pressures.reshape(-1, 1)).flatten()
+flow_normalized = scaler_X.fit_transform(flow_rate.reshape(-1, 1)).flatten()
+pressure_normalized = scaler_y.fit_transform(pressure.reshape(-1, 1)).flatten()
 
-# Combine normalized data
-data_normalized = np.column_stack([flows_normalized, pressures_normalized])
-
-
-# SECTION 6 : Create sequences for training
-print("Creating sequences...")
-X_data = []
-Y_data = []
-
-for i in range(len(data_normalized) - SEQ_LENGTH - PRED_LENGTH + 1):
-    # Input: both flow and pressure history
-    input_seq = data_normalized[i:i+SEQ_LENGTH]
-    X_data.append(input_seq)
-    
-    # Output: future sequences with both features (matching your format)
-    # This creates a sequence-to-sequence mapping
-    output_seq = data_normalized[i+SEQ_LENGTH:i+SEQ_LENGTH+PRED_LENGTH]
-    Y_data.append(output_seq)
-
-X_data = np.array(X_data)
-Y_data = np.array(Y_data)
-
-print(f"Total sequences: {len(X_data)}")
-print(f"X shape: {X_data.shape}")  # (samples, seq_length, features)
-print(f"Y shape: {Y_data.shape}")  # (samples, pred_length, features)
+# Combine data
+data = np.column_stack((flow_normalized, pressure_normalized))
 
 
-# SECTION 7 : [REMOVED - handled by K-Fold]
+# SECTION 6 : Create sequences
+def create_sequences(data, seq_length=50, stride=1):
+    X, y = [], []
+    for i in range(0, len(data) - seq_length, stride):
+        X.append(data[i:i+seq_length, 0])  # Flow sequences
+        y.append(data[i+seq_length, 1])     # Next pressure value
+    return np.array(X), np.array(y)
+
+X, y = create_sequences(data, SEQ_LENGTH)
 
 
-# SECTION 8 : Define Sequential-style LSTM Model with Dense Layers
-class SequentialLSTMModel(nn.Module):
-    def __init__(self, input_size=2, output_size=2):
-        super(SequentialLSTMModel, self).__init__()
+# SECTION 7 : Split data
+X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3)
+X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5)
+
+# Convert to tensors
+X_train = torch.FloatTensor(X_train).to(device)
+y_train = torch.FloatTensor(y_train).to(device)
+X_val = torch.FloatTensor(X_val).to(device)
+y_val = torch.FloatTensor(y_val).to(device)
+X_test = torch.FloatTensor(X_test).to(device)
+y_test = torch.FloatTensor(y_test).to(device)
+
+
+# SECTION 8 : Define LSTM Model with Dense Layers
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
+        super(LSTMModel, self).__init__()
         
         # LSTM layer
-        self.lstm1 = nn.LSTM(input_size, 64, batch_first=True)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
         
-        # Two dense layers after LSTM
-        self.dense1 = nn.Linear(64, 32)
+        # Two dense layers
+        self.dense1 = nn.Linear(hidden_size, 32)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(0.2)  # Optional dropout for regularization
-        self.dense2 = nn.Linear(32, output_size)
-     
+        self.dropout = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(32, 1)
+        
     def forward(self, x):
-        # Pass through LSTM
-        lstm_out, _ = self.lstm1(x)
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
         
-        # Apply dense layers to each time step
-        # lstm_out shape: (batch, seq_length, 64)
+        x = self.dense1(last_output)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
         
-        # Reshape for dense layers: (batch * seq_length, 64)
-        batch_size = lstm_out.shape[0]
-        seq_len = lstm_out.shape[1]
-        lstm_out_reshaped = lstm_out.reshape(-1, 64)
-        
-        # Pass through dense layers
-        dense_out = self.dense1(lstm_out_reshaped)
-        dense_out = self.relu(dense_out)
-        dense_out = self.dropout(dense_out)
-        dense_out = self.dense2(dense_out)
-        
-        # Reshape back to (batch, seq_length, output_size)
-        output = dense_out.reshape(batch_size, seq_len, -1)
-        
-        # Return only the last PRED_LENGTH outputs
-        return output[:, -PRED_LENGTH:, :]
+        return x
 
 
-# SECTION 9 : Define custom dip-aware loss function
-def dip_aware_loss(predictions, targets, dip_threshold=-5.0):
-    """Weighted loss that penalizes missing pressure dips more heavily"""
-    # Base MSE loss
-    mse_loss = nn.MSELoss()(predictions, targets)
+# SECTION 9 : Initialize model
+model = LSTMModel(input_size=1, hidden_size=HIDDEN_SIZE, 
+                 num_layers=NUM_LAYERS, dropout=DROPOUT).to(device)
+
+
+# SECTION 10 : Training function
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size):
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
     
-    # Denormalize the pressure values to check for dips
-    # We need to inverse transform to get actual pressure values
-    targets_pressure_norm = targets[:, :, 1].cpu().detach().numpy()
-    targets_pressure_actual = pressure_scaler.inverse_transform(
-        targets_pressure_norm.reshape(-1, 1)
-    ).reshape(targets_pressure_norm.shape)
-    
-    # Convert back to tensor and identify dips
-    targets_pressure_actual = torch.tensor(targets_pressure_actual, device=targets.device)
-    pressure_drops = targets_pressure_actual < dip_threshold
-    
-    # Higher weight on dip regions
-    weights = torch.where(pressure_drops, 3.0, 1.0)
-    
-    # Calculate weighted loss only for pressure predictions
-    weighted_loss = weights * (predictions[:, :, 1] - targets[:, :, 1])**2
-    
-    # Combine base MSE with additional weighted penalty
-    return mse_loss + weighted_loss.mean()
-
-
-# SECTION 10 : [REMOVED - handled in K-Fold loop]
-
-
-# SECTION 11 : Training function that mimics Keras fit()
-def fit(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, verbose=2):
     train_losses = []
     val_losses = []
-    
-    # Create optimizer for this model
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     for epoch in range(epochs):
         # Training
@@ -153,16 +115,17 @@ def fit(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, verbose=2):
         epoch_loss = 0
         num_batches = 0
         
+        # Process in batches
         for i in range(0, len(X_train), batch_size):
             batch_X = X_train[i:i+batch_size]
-            batch_Y = Y_train[i:i+batch_size]
+            batch_y = y_train[i:i+batch_size]
             
-            # Forward pass
-            predictions = model(batch_X)
-            loss = dip_aware_loss(predictions, batch_Y)  # Uses dip_aware_loss
+            # Add dimension for LSTM input
+            batch_X = batch_X.unsqueeze(-1)
             
-            # Backward pass
             optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs.squeeze(), batch_y)
             loss.backward()
             optimizer.step()
             
@@ -175,215 +138,96 @@ def fit(model, X_train, Y_train, X_val, Y_val, epochs, batch_size, verbose=2):
         # Validation
         model.eval()
         with torch.no_grad():
-            val_predictions = model(X_val)
-            val_loss = dip_aware_loss(val_predictions, Y_val)  # Uses dip_aware_loss
+            X_val_input = X_val.unsqueeze(-1)
+            val_outputs = model(X_val_input)
+            val_loss = criterion(val_outputs.squeeze(), y_val)
             val_losses.append(val_loss.item())
         
-        # Print progress (verbose=2 means one line per epoch)
-        if verbose == 2:
-            print(f'Epoch {epoch+1}/{epochs} - loss: {avg_train_loss:.4f} - val_loss: {val_loss.item():.4f}')
-        elif verbose == 1 and (epoch + 1) % 100 == 0:
-            print(f'Epoch {epoch+1}/{epochs} - loss: {avg_train_loss:.4f} - val_loss: {val_loss.item():.4f}')
+        scheduler.step(val_loss)
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {val_loss:.6f}")
     
     return train_losses, val_losses
 
 
-# SECTION 12 : Time Series K-Fold Cross-Validation Training
-print("\nStarting Time Series K-Fold Cross-Validation...")
-
-# Initialize Time Series Split
-tscv = TimeSeriesSplit(n_splits=N_SPLITS, gap=10)  # gap prevents data leakage
-
-# Storage for all fold results
-all_fold_results = []
-
-for fold, (train_idx, val_idx) in enumerate(tscv.split(X_data), 1):
-    print(f"\n--- Fold {fold}/{N_SPLITS} ---")
-    print(f"Training samples: {len(train_idx)}, Validation samples: {len(val_idx)}")
-    
-    # Split data for this fold
-    X_train = torch.FloatTensor(X_data[train_idx]).to(device)
-    Y_train = torch.FloatTensor(Y_data[train_idx]).to(device)
-    X_test = torch.FloatTensor(X_data[val_idx]).to(device)
-    Y_test = torch.FloatTensor(Y_data[val_idx]).to(device)
-    
-    # Create fresh model for this fold
-    model = SequentialLSTMModel(input_size=2, output_size=2).to(device)
-    
-    # Print model info only for first fold
-    if fold == 1:
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"\nModel has {total_params:,} parameters")
-        print("Using dip-aware loss function with threshold -5.0 psiA")
-    
-    # Train the model
-    print(f"\nTraining model for fold {fold}...")
-    train_losses, val_losses = fit(
-        model, X_train, Y_train, X_test, Y_test,
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        verbose=2
-    )
-    
-    # SECTION 13 : Evaluate model for this fold
-    print(f"\nEvaluating model for fold {fold}...")
-    model.eval()
-    
-    with torch.no_grad():
-        predictions = model(X_test).cpu().numpy()
-        targets = Y_test.cpu().numpy()
-    
-    # Extract just the pressure predictions (column 1)
-    predictions_pressure = predictions[:, :, 1]
-    targets_pressure = targets[:, :, 1]
-    
-    # Denormalize pressures
-    predictions_actual = pressure_scaler.inverse_transform(
-        predictions_pressure.reshape(-1, 1)
-    ).reshape(predictions_pressure.shape)
-    
-    targets_actual = pressure_scaler.inverse_transform(
-        targets_pressure.reshape(-1, 1)
-    ).reshape(targets_pressure.shape)
-    
-    # Calculate metrics
-    correlation = np.corrcoef(predictions_actual.flatten(), targets_actual.flatten())[0, 1]
-    fidelity_score = correlation * 100
-    
-    mse = np.mean((predictions_actual - targets_actual) ** 2)
-    rmse = np.sqrt(mse)
-    mae = np.mean(np.abs(predictions_actual - targets_actual))
-    
-    # Calculate dip detection metrics
-    dip_mask = targets_actual < -5.0
-    if dip_mask.any():
-        dip_mse = np.mean((predictions_actual[dip_mask] - targets_actual[dip_mask]) ** 2)
-        dip_rmse = np.sqrt(dip_mse)
-        print(f"\nDip regions RMSE: {dip_rmse:.2f} psiA")
-        print(f"Number of dip samples: {dip_mask.sum()}")
-    
-    print(f"\nFold {fold} Results:")
-    print(f"Fidelity Score: {fidelity_score:.1f}%")
-    print(f"Overall RMSE: {rmse:.2f} psiA")
-    print(f"Overall MAE: {mae:.2f} psiA")
-    
-    # Store results for this fold
-    all_fold_results.append({
-        'fold': fold,
-        'train_losses': train_losses,
-        'val_losses': val_losses,
-        'fidelity_score': fidelity_score,
-        'rmse': rmse,
-        'mae': mae,
-        'correlation': correlation,
-        'predictions_actual': predictions_actual,
-        'targets_actual': targets_actual
-    })
-
-# Print overall K-Fold summary
-print("\n" + "="*60)
-print("K-FOLD CROSS-VALIDATION SUMMARY")
-print("="*60)
-
-fidelities = [r['fidelity_score'] for r in all_fold_results]
-rmses = [r['rmse'] for r in all_fold_results]
-maes = [r['mae'] for r in all_fold_results]
-correlations = [r['correlation'] for r in all_fold_results]
-
-print(f"Average Fidelity Score: {np.mean(fidelities):.1f}% ± {np.std(fidelities):.1f}%")
-print(f"Average RMSE: {np.mean(rmses):.2f} ± {np.std(rmses):.2f} psiA")
-print(f"Average MAE: {np.mean(maes):.2f} ± {np.std(maes):.2f} psiA")
-print(f"Average Correlation: {np.mean(correlations):.3f} ± {np.std(correlations):.3f}")
+# SECTION 11 : Train the model
+train_losses, val_losses = train_model(model, X_train, y_train, X_val, y_val, 
+                                       epochs=EPOCHS, batch_size=BATCH_SIZE)
 
 
-# SECTION 14 : Visualization (using last fold's results)
-last_fold = all_fold_results[-1]
-train_losses = last_fold['train_losses']
-val_losses = last_fold['val_losses']
-predictions_actual = last_fold['predictions_actual']
-targets_actual = last_fold['targets_actual']
-correlation = last_fold['correlation']
+# SECTION 12 : Evaluate model
+model.eval()
 
+with torch.no_grad():
+    X_test_input = X_test.unsqueeze(-1)
+    predictions = model(X_test_input).squeeze().cpu().numpy()
+    actuals = y_test.cpu().numpy()
+
+# Denormalize
+predictions_orig = scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+actuals_orig = scaler_y.inverse_transform(actuals.reshape(-1, 1)).flatten()
+
+# Calculate metrics
+mse = np.mean((predictions_orig - actuals_orig) ** 2)
+rmse = np.sqrt(mse)
+
+# Calculate R-squared for fidelity
+ss_res = np.sum((actuals_orig - predictions_orig) ** 2)
+ss_tot = np.sum((actuals_orig - np.mean(actuals_orig)) ** 2)
+r2 = 1 - (ss_res / ss_tot)
+fidelity = r2 * 100
+
+
+# SECTION 13 : Print results
+print("\n" + "="*50)
+print("RESULTS")
+print("="*50)
+print(f"Fidelity Score: {fidelity:.2f}%")
+print(f"RMSE: {rmse:.2f} PSI")
+print("="*50)
+
+
+# SECTION 14 : Visualization
 fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
 # Plot 1: Training history
 axes[0, 0].plot(train_losses, label='Train Loss', alpha=0.7)
 axes[0, 0].plot(val_losses, label='Val Loss', alpha=0.7)
-axes[0, 0].set_title(f'Training History - Fold {N_SPLITS} (Dip-Aware Loss)')
+axes[0, 0].set_title('Training History')
 axes[0, 0].set_xlabel('Epoch')
 axes[0, 0].set_ylabel('Loss')
 axes[0, 0].legend()
 axes[0, 0].grid(True, alpha=0.3)
-axes[0, 0].set_yscale('log')  # Log scale for better visibility
 
-# Plot 2: Time series predictions (first timestep)
-n_show = min(200, len(targets_actual))
-axes[0, 1].plot(targets_actual[:n_show, 0], 'b-', label='Actual', linewidth=2)
-axes[0, 1].plot(predictions_actual[:n_show, 0], 'r-', label='Predicted', alpha=0.8)
-axes[0, 1].axhline(y=-5.0, color='g', linestyle='--', alpha=0.5, label='Dip Threshold')
-axes[0, 1].set_title('Pressure Predictions - First Step')
+# Plot 2: Predictions vs Actuals
+sample_size = min(500, len(predictions_orig))
+axes[0, 1].plot(actuals_orig[:sample_size], 'b-', label='Actual', alpha=0.7)
+axes[0, 1].plot(predictions_orig[:sample_size], 'r-', label='Predicted', alpha=0.7)
+axes[0, 1].set_title('Pressure Predictions')
 axes[0, 1].set_xlabel('Test Sample')
-axes[0, 1].set_ylabel('Pressure (psiA)')
+axes[0, 1].set_ylabel('Pressure (PSI)')
 axes[0, 1].legend()
 axes[0, 1].grid(True, alpha=0.3)
 
 # Plot 3: Scatter plot
-axes[1, 0].scatter(targets_actual.flatten(), predictions_actual.flatten(), 
-                   alpha=0.5, s=1, c='blue')
-# Highlight dip regions
-dip_points = targets_actual.flatten() < -5.0
-if dip_points.any():
-    axes[1, 0].scatter(targets_actual.flatten()[dip_points], 
-                       predictions_actual.flatten()[dip_points], 
-                       alpha=0.8, s=2, c='red', label='Dip regions')
-min_val = min(targets_actual.min(), predictions_actual.min())
-max_val = max(targets_actual.max(), predictions_actual.max())
+axes[1, 0].scatter(actuals_orig, predictions_orig, alpha=0.5, s=1, c='blue')
+min_val = min(actuals_orig.min(), predictions_orig.min())
+max_val = max(actuals_orig.max(), predictions_orig.max())
 axes[1, 0].plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
-axes[1, 0].axvline(x=-5.0, color='g', linestyle='--', alpha=0.5)
-axes[1, 0].set_title(f'Prediction Accuracy (Correlation: {correlation:.3f})')
-axes[1, 0].set_xlabel('Actual Pressure (psiA)')
-axes[1, 0].set_ylabel('Predicted Pressure (psiA)')
+axes[1, 0].set_title(f'Prediction Accuracy (R²: {r2:.3f})')
+axes[1, 0].set_xlabel('Actual Pressure (PSI)')
+axes[1, 0].set_ylabel('Predicted Pressure (PSI)')
 axes[1, 0].grid(True, alpha=0.3)
-if dip_points.any():
-    axes[1, 0].legend()
 
-# Plot 4: Multi-step ahead predictions
-axes[1, 1].plot([], [], 'b-', label='Actual', linewidth=2)
-axes[1, 1].plot([], [], 'r-', label='Predicted', alpha=0.8)
-
-for step in range(PRED_LENGTH):
-    actual_step = targets_actual[:50, step]
-    pred_step = predictions_actual[:50, step]
-    axes[1, 1].plot(actual_step, 'b-', alpha=0.7 - step*0.1, linewidth=2-step*0.2)
-    axes[1, 1].plot(pred_step, 'r-', alpha=0.7 - step*0.1, linewidth=2-step*0.2)
-
-axes[1, 1].axhline(y=-5.0, color='g', linestyle='--', alpha=0.5, label='Dip Threshold')
-axes[1, 1].set_title(f'Multi-Step Predictions (Steps 1-{PRED_LENGTH})')
-axes[1, 1].set_xlabel('Test Sample')
-axes[1, 1].set_ylabel('Pressure (psiA)')
-axes[1, 1].legend()
+# Plot 4: Residuals
+residuals = actuals_orig - predictions_orig
+axes[1, 1].hist(residuals, bins=50, edgecolor='black', alpha=0.7)
+axes[1, 1].set_title('Residuals Distribution')
+axes[1, 1].set_xlabel('Residual (Actual - Predicted)')
+axes[1, 1].set_ylabel('Frequency')
+axes[1, 1].axvline(x=0, color='r', linestyle='--', alpha=0.5)
 axes[1, 1].grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.show()
-
-print("\nDone! Model structure:")
-print("- LSTM (64 units) -> Dense (32 units) -> ReLU -> Dropout(0.2) -> Dense (2 units)")
-print("- Time Series K-Fold Cross-Validation with 5 folds")
-print("- Dip-aware loss function with 3x weight on pressure dips < -5.0 psiA")
-print("- Batch size = 1, Epochs = 1000")
-
-# Calculate fidelity scores
-# Accuracy (how close are values?)
-errors = np.abs(predictions_actual - targets_actual)
-mean_error = np.mean(errors)
-pressure_range = np.max(targets_actual) - np.min(targets_actual)
-accuracy_score = (1 - mean_error / pressure_range) * 100
-accuracy_score = max(0, min(100, accuracy_score))
-
-# Dynamics (how well we follow pattern?)
-dynamics_score = correlation * 100
-
-print(f"Accuracy Score: {accuracy_score:.1f}% (how close to actual values)")
-print(f"Dynamics Score: {dynamics_score:.1f}% (how well we capture patterns)")
-print(f"Overall Fidelity: {(accuracy_score + dynamics_score) / 2:.1f}%")
