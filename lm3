@@ -1,0 +1,541 @@
+# SECTION 1 : Imports
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+from collections import defaultdict
+import copy
+
+
+# SECTION 2 : Basic settings
+SEQ_LENGTH = 50  # How many past steps to use
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 100
+HIDDEN_SIZE = 64
+NUM_LAYERS = 2
+DROPOUT = 0.2
+K_FOLDS = 5  # Number of folds for cross-validation
+TEST_SIZE = 0.2  # Hold-out test set size
+
+
+# SECTION 3 : Check device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+
+# SECTION 4 : Load data
+# df = pd.read_excel('.xlsx')
+df = pd.read_csv('swash_plate_pump_data (7).csv')
+flow_rate = df['Flow Rate (GPM)'].values
+pressure = df['Pressure (PSI)'].values
+
+
+# SECTION 5 : Normalize data
+scaler_X = StandardScaler()
+scaler_y = StandardScaler()
+
+flow_normalized = scaler_X.fit_transform(flow_rate.reshape(-1, 1)).flatten()
+pressure_normalized = scaler_y.fit_transform(pressure.reshape(-1, 1)).flatten()
+
+# Combine data
+data = np.column_stack((flow_normalized, pressure_normalized))
+
+
+# SECTION 6 : Create sequences
+def create_sequences(data, seq_length=50, stride=1):
+    X, y = [], []
+    for i in range(0, len(data) - seq_length, stride):
+        X.append(data[i:i+seq_length, 0])  # Flow sequences
+        y.append(data[i+seq_length, 1])     # Next pressure value
+    return np.array(X), np.array(y)
+
+X, y = create_sequences(data, SEQ_LENGTH)
+
+
+# SECTION 7 : Model Definitions
+
+# 1. FNN (Feedforward Neural Network)
+class FNNModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, dropout=0.2):
+        super(FNNModel, self).__init__()
+        
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, hidden_size * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout / 2),
+            nn.Linear(hidden_size // 2, 1)
+        )
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        return self.layers(x)
+
+
+# 2. Dense-RNN-Dense Model
+class DenseRNNDenseModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, num_layers=2, dropout=0.2):
+        super(DenseRNNDenseModel, self).__init__()
+        
+        # Initial dense layer
+        self.dense1 = nn.Linear(input_size, hidden_size)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        
+        # RNN layer
+        self.rnn = nn.RNN(hidden_size, hidden_size, num_layers, 
+                         batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Final dense layers
+        self.dense2 = nn.Linear(hidden_size, 32)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+        self.dense3 = nn.Linear(32, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        batch_size = x.size(0)
+        
+        # Pass through first dense layer
+        x = self.dense1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        # Reshape for RNN: (batch_size, 1, hidden_size)
+        x = x.unsqueeze(1)
+        
+        # RNN processing
+        rnn_out, _ = self.rnn(x)
+        
+        # Take the last output
+        x = rnn_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        x = self.dense3(x)
+        
+        return x
+
+
+# 3. Dense-LSTM-Dense Model  
+class DenseLSTMDenseModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, num_layers=2, dropout=0.2):
+        super(DenseLSTMDenseModel, self).__init__()
+        
+        # Initial dense layer
+        self.dense1 = nn.Linear(input_size, hidden_size)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Final dense layers
+        self.dense2 = nn.Linear(hidden_size, 32)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+        self.dense3 = nn.Linear(32, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        batch_size = x.size(0)
+        
+        # Pass through first dense layer
+        x = self.dense1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        # Reshape for LSTM: (batch_size, 1, hidden_size)
+        x = x.unsqueeze(1)
+        
+        # LSTM processing
+        lstm_out, _ = self.lstm(x)
+        
+        # Take the last output
+        x = lstm_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        x = self.dense3(x)
+        
+        return x
+
+
+# 4. Original LSTM Model (modified to work with the new framework)
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
+        super(LSTMModel, self).__init__()
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Two dense layers
+        self.dense1 = nn.Linear(hidden_size, 32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(32, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length) or (batch_size, seq_length, 1)
+        if len(x.shape) == 2:
+            x = x.unsqueeze(-1)  # Add feature dimension
+            
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        
+        x = self.dense1(last_output)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+# SECTION 8 : Training function with early stopping
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, patience=15):
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
+    
+    train_losses = []
+    val_losses = []
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        epoch_loss = 0
+        num_batches = 0
+        
+        # Process in batches
+        for i in range(0, len(X_train), batch_size):
+            batch_X = X_train[i:i+batch_size]
+            batch_y = y_train[i:i+batch_size]
+            
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs.squeeze(), batch_y)
+            loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+            epoch_loss += loss.item()
+            num_batches += 1
+        
+        avg_train_loss = epoch_loss / num_batches
+        train_losses.append(avg_train_loss)
+        
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val)
+            val_loss = criterion(val_outputs.squeeze(), y_val)
+            val_losses.append(val_loss.item())
+        
+        scheduler.step(val_loss)
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+            
+        if (epoch + 1) % 20 == 0:
+            print(f"  Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {val_loss:.6f}")
+    
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    return train_losses, val_losses, model
+
+
+# SECTION 9 : K-Fold Cross Validation
+def kfold_cross_validation(model_class, model_kwargs, X_data, y_data, k_folds=5):
+    """
+    Perform k-fold cross validation for a given model
+    """
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    
+    fold_results = {
+        'train_losses': [],
+        'val_losses': [],
+        'final_train_loss': [],
+        'final_val_loss': []
+    }
+    
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(X_data)):
+        print(f"    Fold {fold+1}/{k_folds}")
+        
+        # Get fold data
+        X_train_fold = torch.FloatTensor(X_data[train_idx]).to(device)
+        y_train_fold = torch.FloatTensor(y_data[train_idx]).to(device)
+        X_val_fold = torch.FloatTensor(X_data[val_idx]).to(device)
+        y_val_fold = torch.FloatTensor(y_data[val_idx]).to(device)
+        
+        # Create new model instance
+        model = model_class(**model_kwargs).to(device)
+        
+        # Train model
+        train_losses, val_losses, trained_model = train_model(
+            model, X_train_fold, y_train_fold, X_val_fold, y_val_fold,
+            epochs=EPOCHS, batch_size=BATCH_SIZE
+        )
+        
+        fold_results['train_losses'].append(train_losses)
+        fold_results['val_losses'].append(val_losses)
+        fold_results['final_train_loss'].append(train_losses[-1])
+        fold_results['final_val_loss'].append(val_losses[-1])
+    
+    # Calculate statistics
+    fold_results['avg_train_loss'] = np.mean(fold_results['final_train_loss'])
+    fold_results['std_train_loss'] = np.std(fold_results['final_train_loss'])
+    fold_results['avg_val_loss'] = np.mean(fold_results['final_val_loss'])
+    fold_results['std_val_loss'] = np.std(fold_results['final_val_loss'])
+    
+    return fold_results
+
+
+# SECTION 10 : Main training and evaluation
+def main():
+    # Split data: 80% for k-fold CV, 20% for final testing
+    test_split_idx = int(len(X) * (1 - TEST_SIZE))
+    
+    # Shuffle indices
+    indices = np.random.permutation(len(X))
+    train_cv_indices = indices[:test_split_idx]
+    test_indices = indices[test_split_idx:]
+    
+    X_train_cv = X[train_cv_indices]
+    y_train_cv = y[train_cv_indices]
+    X_test = X[test_indices]
+    y_test = y[test_indices]
+    
+    print(f"Data split: {len(X_train_cv)} samples for k-fold CV, {len(X_test)} samples for testing")
+    print(f"K-fold cross validation with {K_FOLDS} folds\n")
+    
+    # Define models to train
+    models = {
+        'FNN': (FNNModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 'dropout': DROPOUT}),
+        'Dense-RNN-Dense': (DenseRNNDenseModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 
+                                                  'num_layers': NUM_LAYERS, 'dropout': DROPOUT}),
+        'Dense-LSTM-Dense': (DenseLSTMDenseModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 
+                                                    'num_layers': NUM_LAYERS, 'dropout': DROPOUT}),
+        'LSTM (Original)': (LSTMModel, {'input_size': 1, 'hidden_size': HIDDEN_SIZE, 
+                                        'num_layers': NUM_LAYERS, 'dropout': DROPOUT})
+    }
+    
+    results = {}
+    final_models = {}
+    
+    # Train each model with k-fold cross validation
+    for model_name, (model_class, model_kwargs) in models.items():
+        print(f"\nTraining {model_name} with {K_FOLDS}-fold cross validation...")
+        
+        # Perform k-fold cross validation
+        cv_results = kfold_cross_validation(
+            model_class, model_kwargs, X_train_cv, y_train_cv, K_FOLDS
+        )
+        
+        results[model_name] = cv_results
+        
+        # Train final model on all training data
+        print(f"  Training final {model_name} on all training data...")
+        X_train_tensor = torch.FloatTensor(X_train_cv).to(device)
+        y_train_tensor = torch.FloatTensor(y_train_cv).to(device)
+        
+        # Split for validation (80/20 of training data)
+        val_split = int(len(X_train_cv) * 0.8)
+        X_train_final = X_train_tensor[:val_split]
+        y_train_final = y_train_tensor[:val_split]
+        X_val_final = X_train_tensor[val_split:]
+        y_val_final = y_train_tensor[val_split:]
+        
+        final_model = model_class(**model_kwargs).to(device)
+        train_losses, val_losses, trained_model = train_model(
+            final_model, X_train_final, y_train_final, X_val_final, y_val_final,
+            epochs=EPOCHS, batch_size=BATCH_SIZE
+        )
+        
+        final_models[model_name] = trained_model
+        results[model_name]['final_training_history'] = (train_losses, val_losses)
+        
+        # Evaluate on test set
+        trained_model.eval()
+        X_test_tensor = torch.FloatTensor(X_test).to(device)
+        y_test_tensor = torch.FloatTensor(y_test).to(device)
+        
+        with torch.no_grad():
+            predictions = trained_model(X_test_tensor).squeeze().cpu().numpy()
+            actuals = y_test_tensor.cpu().numpy()
+        
+        # Denormalize
+        predictions_orig = scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+        actuals_orig = scaler_y.inverse_transform(actuals.reshape(-1, 1)).flatten()
+        
+        # Calculate metrics
+        mse = np.mean((predictions_orig - actuals_orig) ** 2)
+        mae = np.mean(np.abs(predictions_orig - actuals_orig))
+        ss_res = np.sum((actuals_orig - predictions_orig) ** 2)
+        ss_tot = np.sum((actuals_orig - np.mean(actuals_orig)) ** 2)
+        r2 = 1 - (ss_res / ss_tot)
+        
+        results[model_name]['test_mse'] = mse
+        results[model_name]['test_mae'] = mae
+        results[model_name]['test_r2'] = r2
+        results[model_name]['fidelity'] = r2 * 100
+        results[model_name]['predictions'] = predictions_orig
+        results[model_name]['actuals'] = actuals_orig
+    
+    return results, final_models
+
+
+# SECTION 11 : Run training and evaluation
+results, final_models = main()
+
+
+# SECTION 12 : Print comparison results
+print("\n" + "="*90)
+print("MODEL COMPARISON RESULTS (K-FOLD CROSS VALIDATION)")
+print("="*90)
+print(f"{'Model':<20} {'CV Loss (mean±std)':<25} {'Test MSE':<12} {'Test MAE':<12} {'Test R²':<10} {'Fidelity':<10}")
+print("-"*90)
+
+for model_name, res in results.items():
+    cv_loss = f"{res['avg_val_loss']:.6f} ± {res['std_val_loss']:.6f}"
+    print(f"{model_name:<20} {cv_loss:<25} {res['test_mse']:<12.4f} {res['test_mae']:<12.4f} "
+          f"{res['test_r2']:<10.4f} {res['fidelity']:<10.2f}%")
+
+# Find best model
+best_model = min(results.items(), key=lambda x: x[1]['avg_val_loss'])
+print(f"\nBest model based on CV validation loss: {best_model[0]}")
+
+# Overfitting analysis
+print("\nOVERFITTING ANALYSIS:")
+print("-"*50)
+for model_name, res in results.items():
+    overfitting_ratio = res['avg_val_loss'] / res['avg_train_loss']
+    status = "✓ Good" if overfitting_ratio < 1.2 else "⚠ Potential Overfitting"
+    print(f"{model_name:<20} Train/Val Ratio: {overfitting_ratio:.3f} ({status})")
+
+
+# SECTION 13 : Visualization
+fig = plt.figure(figsize=(16, 12))
+
+# Create grid
+gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+
+# Plot 1: Training histories for all models (2x2 grid in top-left)
+model_names = list(results.keys())
+for idx, model_name in enumerate(model_names):
+    ax = fig.add_subplot(gs[idx // 2, idx % 2])
+    
+    train_losses, val_losses = results[model_name]['final_training_history']
+    ax.plot(train_losses, label='Train Loss', alpha=0.7)
+    ax.plot(val_losses, label='Val Loss', alpha=0.7)
+    ax.set_title(f'{model_name}')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+# Plot 2: CV Loss Comparison (top-right)
+ax = fig.add_subplot(gs[0, 2])
+model_names_short = [name.replace(' (Original)', '') for name in model_names]
+cv_means = [results[name]['avg_val_loss'] for name in model_names]
+cv_stds = [results[name]['std_val_loss'] for name in model_names]
+
+x_pos = np.arange(len(model_names))
+colors = ['blue', 'green', 'orange', 'red']
+bars = ax.bar(x_pos, cv_means, yerr=cv_stds, capsize=5, alpha=0.7, color=colors)
+ax.set_xticks(x_pos)
+ax.set_xticklabels(model_names_short, rotation=45, ha='right')
+ax.set_ylabel('Validation Loss')
+ax.set_title('K-Fold CV Results (Lower is Better)')
+ax.grid(True, alpha=0.3)
+
+# Plot 3: Test Metrics Comparison (middle-right)
+ax = fig.add_subplot(gs[1, 2])
+metrics_data = {
+    'MSE': [results[name]['test_mse'] for name in model_names],
+    'MAE': [results[name]['test_mae'] for name in model_names],
+    'R² × 100': [results[name]['test_r2'] * 100 for name in model_names]
+}
+
+x = np.arange(len(model_names))
+width = 0.25
+
+for i, (metric, values) in enumerate(metrics_data.items()):
+    offset = (i - 1) * width
+    ax.bar(x + offset, values, width, label=metric, alpha=0.7)
+
+ax.set_xlabel('Model')
+ax.set_xticks(x)
+ax.set_xticklabels(model_names_short, rotation=45, ha='right')
+ax.set_ylabel('Value')
+ax.set_title('Test Set Metrics')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+# Plot 4: Best Model Predictions (bottom row, spanning 2 columns)
+best_model_name = best_model[0]
+ax = fig.add_subplot(gs[2, :2])
+
+predictions = results[best_model_name]['predictions']
+actuals = results[best_model_name]['actuals']
+sample_size = min(500, len(predictions))
+
+ax.plot(actuals[:sample_size], 'b-', label='Actual', alpha=0.7, linewidth=1)
+ax.plot(predictions[:sample_size], 'r-', label='Predicted', alpha=0.7, linewidth=1)
+ax.set_title(f'Best Model ({best_model_name}) - Pressure Predictions')
+ax.set_xlabel('Test Sample')
+ax.set_ylabel('Pressure (PSI)')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+# Plot 5: Scatter plot for best model (bottom-right)
+ax = fig.add_subplot(gs[2, 2])
+ax.scatter(actuals, predictions, alpha=0.5, s=1, c='blue')
+min_val = min(actuals.min(), predictions.min())
+max_val = max(actuals.max(), predictions.max())
+ax.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+ax.set_title(f"Best Model R²: {results[best_model_name]['test_r2']:.4f}")
+ax.set_xlabel('Actual Pressure (PSI)')
+ax.set_ylabel('Predicted Pressure (PSI)')
+ax.grid(True, alpha=0.3)
+
+plt.suptitle('Model Comparison with K-Fold Cross Validation', fontsize=16, y=1.02)
+plt.tight_layout()
+plt.show()
+
+print(f"\n✓ Training complete. Best model ({best_model_name}) achieved {results[best_model_name]['fidelity']:.2f}% fidelity.")
+print("All models have been saved in the 'final_models' dictionary for deployment.")
