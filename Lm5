@@ -1,0 +1,339 @@
+# IMMEDIATE FIXES FOR YOUR VERSION_19.py
+
+# Apply these changes to your existing code to fix overfitting
+
+# ============================================================================
+
+# FIX 1: REPLACE YOUR SECTION 6 - Add gap to prevent sequence overlap
+
+# ============================================================================
+
+# SECTION 6 : Create sequences WITH GAP (prevents data leakage)
+
+def create_sequences(data, seq_length=50, stride=10):  # Changed stride from 1 to 10
+“””
+CRITICAL CHANGE: Using stride=10 instead of 1 reduces overlap
+This prevents the model from memorizing patterns
+“””
+X, y = [], []
+for i in range(0, len(data) - seq_length, stride):  # Skip ‘stride’ samples
+X.append(data[i:i+seq_length, 0])  # Flow sequences
+y.append(data[i+seq_length, 1])     # Next pressure value
+return np.array(X), np.array(y)
+
+X, y = create_sequences(data, SEQ_LENGTH, stride=10)  # Add stride parameter
+print(f”Created {len(X)} sequences (was ~{len(data)-SEQ_LENGTH} with stride=1)”)
+
+# ============================================================================
+
+# FIX 2: REPLACE YOUR SECTION 7 - Use time-based split instead of random
+
+# ============================================================================
+
+# SECTION 7 : Time-based split (CRITICAL for time series)
+
+# Calculate split indices
+
+n_samples = len(X)
+train_end = int(n_samples * 0.7)
+val_end = int(n_samples * 0.85)
+
+# Create splits maintaining temporal order
+
+X_train = X[:train_end]
+y_train = y[:train_end]
+X_val = X[train_end:val_end]
+y_val = y[train_end:val_end]
+X_test = X[val_end:]
+y_test = y[val_end:]
+
+print(f”Time-based split: Train={len(X_train)}, Val={len(X_val)}, Test={len(X_test)}”)
+print(f”Train: samples 0-{train_end}”)
+print(f”Val: samples {train_end}-{val_end}”)
+print(f”Test: samples {val_end}-{n_samples}”)
+
+# Convert to tensors
+
+X_train = torch.FloatTensor(X_train).to(device)
+y_train = torch.FloatTensor(y_train).to(device)
+X_val = torch.FloatTensor(X_val).to(device)
+y_val = torch.FloatTensor(y_val).to(device)
+X_test = torch.FloatTensor(X_test).to(device)
+y_test = torch.FloatTensor(y_test).to(device)
+
+# ============================================================================
+
+# FIX 3: REPLACE YOUR SECTION 8 - Simplified model with more dropout
+
+# ============================================================================
+
+# SECTION 8 : Simplified LSTM Model with Heavy Regularization
+
+class LSTMModel(nn.Module):
+def **init**(self, input_size=1, hidden_size=32, num_layers=1, dropout=0.5):
+super(LSTMModel, self).**init**()
+
+```
+    # REDUCED COMPLEXITY: smaller hidden_size, fewer layers
+    self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                       batch_first=True, dropout=0 if num_layers == 1 else dropout)
+    
+    # HEAVY DROPOUT in dense layers
+    self.dropout1 = nn.Dropout(dropout)
+    self.dense1 = nn.Linear(hidden_size, 16)  # Reduced from 32
+    self.relu = nn.ReLU()
+    self.dropout2 = nn.Dropout(dropout)
+    self.dense2 = nn.Linear(16, 1)  # Reduced pathway
+    
+def forward(self, x):
+    lstm_out, _ = self.lstm(x)
+    last_output = lstm_out[:, -1, :]
+    
+    x = self.dropout1(last_output)  # Dropout BEFORE first dense
+    x = self.dense1(x)
+    x = self.relu(x)
+    x = self.dropout2(x)  # Heavy dropout
+    x = self.dense2(x)
+    
+    return x
+```
+
+# ============================================================================
+
+# FIX 4: REPLACE YOUR SECTION 9 - Initialize with smaller model
+
+# ============================================================================
+
+# SECTION 9 : Initialize SIMPLIFIED model
+
+model = LSTMModel(
+input_size=1,
+hidden_size=32,  # REDUCED from 64
+num_layers=1,    # REDUCED from 2
+dropout=0.5      # INCREASED from 0.2
+).to(device)
+
+# Add L1/L2 regularization to optimizer
+
+optimizer = optim.Adam(
+model.parameters(),
+lr=LEARNING_RATE,
+weight_decay=0.01  # L2 regularization
+)
+
+# ============================================================================
+
+# FIX 5: REPLACE YOUR SECTION 10 - Enhanced training with regularization
+
+# ============================================================================
+
+# SECTION 10 : Training function with additional regularization
+
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size):
+criterion = nn.MSELoss()
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode=‘min’, patience=10, factor=0.5)
+
+```
+train_losses = []
+val_losses = []
+best_val_loss = float('inf')
+best_model_state = None
+patience = 20  # Early stopping patience
+patience_counter = 0
+
+for epoch in range(epochs):
+    # Training
+    model.train()
+    epoch_loss = 0
+    num_batches = 0
+    
+    # Shuffle data each epoch
+    indices = torch.randperm(len(X_train))
+    X_train_shuffled = X_train[indices]
+    y_train_shuffled = y_train[indices]
+    
+    # Process in batches
+    for i in range(0, len(X_train), batch_size):
+        batch_X = X_train_shuffled[i:i+batch_size]
+        batch_y = y_train_shuffled[i:i+batch_size]
+        
+        # Add dimension for LSTM input
+        batch_X = batch_X.unsqueeze(-1)
+        
+        # Add noise to inputs for regularization (during training only)
+        if epoch < epochs // 2:  # Only first half of training
+            noise = torch.randn_like(batch_X) * 0.01
+            batch_X = batch_X + noise
+        
+        optimizer.zero_grad()
+        outputs = model(batch_X)
+        
+        # Add label smoothing (small noise to targets)
+        batch_y_smooth = batch_y + torch.randn_like(batch_y) * 0.05
+        
+        loss = criterion(outputs.squeeze(), batch_y_smooth)
+        loss.backward()
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        
+        epoch_loss += loss.item()
+        num_batches += 1
+    
+    avg_train_loss = epoch_loss / num_batches
+    train_losses.append(avg_train_loss)
+    
+    # Validation
+    model.eval()
+    with torch.no_grad():
+        X_val_input = X_val.unsqueeze(-1)
+        val_outputs = model(X_val_input)
+        val_loss = criterion(val_outputs.squeeze(), y_val)
+        val_losses.append(val_loss.item())
+    
+    scheduler.step(val_loss)
+    
+    # Early stopping check
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_model_state = model.state_dict().copy()
+        patience_counter = 0
+    else:
+        patience_counter += 1
+    
+    if patience_counter >= patience:
+        print(f"Early stopping triggered at epoch {epoch+1}")
+        model.load_state_dict(best_model_state)
+        break
+    
+    # Monitor overfitting
+    if (epoch + 1) % 10 == 0:
+        overfitting_ratio = val_loss / avg_train_loss
+        status = "OK" if overfitting_ratio < 1.2 else "OVERFITTING!"
+        print(f"Epoch {epoch+1}/{epochs} - Train: {avg_train_loss:.6f}, "
+              f"Val: {val_loss:.6f}, Ratio: {overfitting_ratio:.3f} [{status}]")
+
+return train_losses, val_losses
+```
+
+# ============================================================================
+
+# ADDITIONAL: Data Augmentation Function (Add before training)
+
+# ============================================================================
+
+def augment_sequences(X, y, augmentation_factor=2):
+“”“Simple data augmentation for time series”””
+X_augmented = [X]
+y_augmented = [y]
+
+```
+for _ in range(augmentation_factor - 1):
+    # Add Gaussian noise
+    noise_X = X + torch.randn_like(X) * 0.01
+    noise_y = y + torch.randn_like(y) * 0.01
+    
+    X_augmented.append(noise_X)
+    y_augmented.append(noise_y)
+
+return torch.cat(X_augmented), torch.cat(y_augmented)
+```
+
+# Apply augmentation to training data only
+
+X_train_aug, y_train_aug = augment_sequences(X_train, y_train, augmentation_factor=2)
+print(f”Augmented training data from {len(X_train)} to {len(X_train_aug)} samples”)
+
+# Use augmented data for training
+
+train_losses, val_losses = train_model(
+model, X_train_aug, y_train_aug, X_val, y_val,
+epochs=EPOCHS, batch_size=BATCH_SIZE
+)
+
+# ============================================================================
+
+# COMPLETE REPLACEMENT SCRIPT (if you want to start fresh)
+
+# ============================================================================
+
+“””
+To use this complete fix:
+
+1. Back up your current Version_19.py
+1. Apply these changes section by section
+1. Key changes summary:
+- Stride=10 in sequence creation (reduces overlap)
+- Time-based split instead of random
+- Smaller model (hidden=32, layers=1)
+- Dropout increased to 0.5
+- Added weight decay, gradient clipping, label smoothing
+- Added early stopping with patience
+- Added data augmentation
+
+Expected results:
+
+- Overfitting ratio should drop from >1.2 to <1.1
+- Validation loss should be more stable
+- Model should generalize better to test set
+  “””
+
+# ============================================================================
+
+# MONITORING FUNCTION - Add this to track overfitting in real-time
+
+# ============================================================================
+
+def plot_overfitting_monitor(train_losses, val_losses):
+“”“Real-time overfitting visualization”””
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+```
+# Loss curves
+ax1.plot(train_losses, label='Train', alpha=0.7)
+ax1.plot(val_losses, label='Val', alpha=0.7)
+ax1.fill_between(range(len(train_losses)), train_losses, val_losses,
+                 where=[v > t for v, t in zip(val_losses, train_losses)],
+                 color='red', alpha=0.2, label='Overfitting')
+ax1.set_title('Training Progress')
+ax1.set_xlabel('Epoch')
+ax1.set_ylabel('Loss')
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Overfitting ratio
+ratios = [v/t if t > 0 else 1 for v, t in zip(val_losses, train_losses)]
+ax2.plot(ratios, alpha=0.7, color='red')
+ax2.axhline(y=1.0, color='green', linestyle='--', alpha=0.5, label='Perfect (1.0)')
+ax2.axhline(y=1.2, color='red', linestyle='--', alpha=0.5, label='Overfit Threshold')
+ax2.fill_between(range(len(ratios)), 1.0, 1.2, color='yellow', alpha=0.2)
+ax2.fill_between(range(len(ratios)), 1.2, max(ratios) if ratios else 2, color='red', alpha=0.2)
+ax2.set_title(f'Overfitting Ratio (Final: {ratios[-1]:.3f})')
+ax2.set_xlabel('Epoch')
+ax2.set_ylabel('Val/Train Ratio')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Print summary
+final_ratio = ratios[-1] if ratios else 0
+if final_ratio < 1.1:
+    print("✅ EXCELLENT: No overfitting detected!")
+elif final_ratio < 1.2:
+    print("✓ GOOD: Minimal overfitting")
+elif final_ratio < 1.5:
+    print("⚠️ WARNING: Moderate overfitting")
+else:
+    print("❌ SEVERE: Strong overfitting detected")
+
+return final_ratio
+```
+
+# Call after training
+
+final_overfitting_ratio = plot_overfitting_monitor(train_losses, val_losses)
