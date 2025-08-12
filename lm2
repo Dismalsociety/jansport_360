@@ -1,0 +1,340 @@
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+class PumpDataset(Dataset):
+    """Custom Dataset for pump time series data"""
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.FloatTensor(y)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+class LSTMPressureModel(nn.Module):
+    """LSTM model with two dense layers for pressure prediction"""
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
+        super(LSTMPressureModel, self).__init__()
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+        
+        # Two dense layers as requested
+        self.dense1 = nn.Linear(hidden_size, 32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(32, 1)
+        
+    def forward(self, x):
+        # LSTM forward pass
+        lstm_out, _ = self.lstm(x)
+        
+        # Take the last output
+        last_output = lstm_out[:, -1, :]
+        
+        # Pass through dense layers
+        x = self.dense1(last_output)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        
+        return x
+
+def create_sequences(data, seq_length=50, stride=1):
+    """Create sequences for LSTM input"""
+    X, y = [], []
+    for i in range(0, len(data) - seq_length, stride):
+        X.append(data[i:i+seq_length, 0])  # Flow rate sequences
+        y.append(data[i+seq_length, 1])     # Next pressure value
+    return np.array(X), np.array(y)
+
+def calculate_pressure_dip_accuracy(y_true, y_pred, threshold_percentile=10):
+    """Calculate accuracy for pressure dip predictions"""
+    # Identify pressure dips (values below threshold)
+    threshold = np.percentile(y_true, threshold_percentile)
+    dips_true = y_true < threshold
+    dips_pred = y_pred < threshold
+    
+    # Calculate accuracy for dip detection
+    dip_accuracy = np.mean(dips_true == dips_pred) * 100
+    
+    # Calculate precision and recall for dips
+    true_positives = np.sum(dips_true & dips_pred)
+    false_positives = np.sum(~dips_true & dips_pred)
+    false_negatives = np.sum(dips_true & ~dips_pred)
+    
+    precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
+    recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
+    
+    return dip_accuracy, precision * 100, recall * 100
+
+def train_model(model, train_loader, val_loader, num_epochs=100, learning_rate=0.001):
+    """Train the LSTM model"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
+    
+    train_losses = []
+    val_losses = []
+    
+    print(f"Training on {device}")
+    print("-" * 50)
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        train_loss = 0
+        for batch_X, batch_y in train_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(batch_X.unsqueeze(-1))
+            loss = criterion(outputs.squeeze(), batch_y)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+        
+        avg_train_loss = train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch_X, batch_y in val_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                outputs = model(batch_X.unsqueeze(-1))
+                loss = criterion(outputs.squeeze(), batch_y)
+                val_loss += loss.item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+        
+        # Learning rate scheduling
+        scheduler.step(avg_val_loss)
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}] - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
+    
+    return train_losses, val_losses
+
+def evaluate_model(model, test_loader, scaler_y):
+    """Evaluate model performance"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    model.eval()
+    
+    predictions = []
+    actuals = []
+    
+    with torch.no_grad():
+        for batch_X, batch_y in test_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            outputs = model(batch_X.unsqueeze(-1))
+            predictions.extend(outputs.squeeze().cpu().numpy())
+            actuals.extend(batch_y.cpu().numpy())
+    
+    predictions = np.array(predictions)
+    actuals = np.array(actuals)
+    
+    # Inverse transform to original scale
+    predictions_orig = scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+    actuals_orig = scaler_y.inverse_transform(actuals.reshape(-1, 1)).flatten()
+    
+    # Calculate metrics
+    mse = np.mean((predictions_orig - actuals_orig) ** 2)
+    rmse = np.sqrt(mse)
+    mae = np.mean(np.abs(predictions_orig - actuals_orig))
+    
+    # R-squared (coefficient of determination)
+    ss_res = np.sum((actuals_orig - predictions_orig) ** 2)
+    ss_tot = np.sum((actuals_orig - np.mean(actuals_orig)) ** 2)
+    r2 = 1 - (ss_res / ss_tot)
+    
+    # Fidelity percentage (based on R-squared)
+    fidelity = r2 * 100
+    
+    # Pressure dip accuracy
+    dip_accuracy, dip_precision, dip_recall = calculate_pressure_dip_accuracy(actuals_orig, predictions_orig)
+    
+    return {
+        'predictions': predictions_orig,
+        'actuals': actuals_orig,
+        'mse': mse,
+        'rmse': rmse,
+        'mae': mae,
+        'r2': r2,
+        'fidelity': fidelity,
+        'dip_accuracy': dip_accuracy,
+        'dip_precision': dip_precision,
+        'dip_recall': dip_recall
+    }
+
+def plot_results(train_losses, val_losses, results, sample_size=500):
+    """Plot learning curves and predictions"""
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    
+    # Learning curve
+    axes[0, 0].plot(train_losses, label='Training Loss', alpha=0.8)
+    axes[0, 0].plot(val_losses, label='Validation Loss', alpha=0.8)
+    axes[0, 0].set_xlabel('Epoch')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].set_title('Learning Curve')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Predictions vs Actuals (sample)
+    sample_idx = min(sample_size, len(results['predictions']))
+    axes[0, 1].plot(results['actuals'][:sample_idx], label='Actual', alpha=0.7)
+    axes[0, 1].plot(results['predictions'][:sample_idx], label='Predicted', alpha=0.7)
+    axes[0, 1].set_xlabel('Time Step')
+    axes[0, 1].set_ylabel('Pressure (PSI)')
+    axes[0, 1].set_title(f'Pressure Predictions (First {sample_idx} samples)')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Scatter plot
+    axes[1, 0].scatter(results['actuals'], results['predictions'], alpha=0.5, s=1)
+    axes[1, 0].plot([results['actuals'].min(), results['actuals'].max()], 
+                    [results['actuals'].min(), results['actuals'].max()], 
+                    'r--', label='Perfect Prediction')
+    axes[1, 0].set_xlabel('Actual Pressure (PSI)')
+    axes[1, 0].set_ylabel('Predicted Pressure (PSI)')
+    axes[1, 0].set_title('Prediction Accuracy')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Residuals histogram
+    residuals = results['actuals'] - results['predictions']
+    axes[1, 1].hist(residuals, bins=50, edgecolor='black', alpha=0.7)
+    axes[1, 1].set_xlabel('Residual (Actual - Predicted)')
+    axes[1, 1].set_ylabel('Frequency')
+    axes[1, 1].set_title('Residuals Distribution')
+    axes[1, 1].axvline(x=0, color='r', linestyle='--', label='Zero Error')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+# Main execution
+def main():
+    # Load data
+    print("Loading data...")
+    df = pd.read_csv('swash_plate_pump_data (7).csv')
+    
+    # Prepare data
+    flow_rate = df['Flow Rate (GPM)'].values
+    pressure = df['Pressure (PSI)'].values
+    
+    # Combine for sequence creation
+    data = np.column_stack((flow_rate, pressure))
+    
+    # Normalize data
+    scaler_X = StandardScaler()
+    scaler_y = StandardScaler()
+    
+    data[:, 0] = scaler_X.fit_transform(data[:, 0].reshape(-1, 1)).flatten()
+    data[:, 1] = scaler_y.fit_transform(data[:, 1].reshape(-1, 1)).flatten()
+    
+    # Create sequences
+    print("Creating sequences...")
+    seq_length = 50  # Use 50 time steps to predict next value
+    X, y = create_sequences(data, seq_length)
+    
+    # Split data
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+    
+    # Create data loaders
+    batch_size = 32
+    train_dataset = PumpDataset(X_train, y_train)
+    val_dataset = PumpDataset(X_val, y_val)
+    test_dataset = PumpDataset(X_test, y_test)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    
+    # Initialize model
+    print("\nInitializing LSTM model with two dense layers...")
+    model = LSTMPressureModel(
+        input_size=1,
+        hidden_size=64,
+        num_layers=2,
+        dropout=0.2
+    )
+    
+    print(f"Model architecture:\n{model}")
+    print(f"\nTotal parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Train model
+    print("\nTraining model...")
+    train_losses, val_losses = train_model(
+        model, 
+        train_loader, 
+        val_loader, 
+        num_epochs=100,
+        learning_rate=0.001
+    )
+    
+    # Evaluate model
+    print("\nEvaluating model...")
+    results = evaluate_model(model, test_loader, scaler_y)
+    
+    # Print results
+    print("\n" + "="*50)
+    print("MODEL PERFORMANCE METRICS")
+    print("="*50)
+    print(f"Fidelity (R² Score): {results['fidelity']:.2f}%")
+    print(f"RMSE: {results['rmse']:.4f} PSI")
+    print(f"MAE: {results['mae']:.4f} PSI")
+    print(f"\nPressure Dip Detection:")
+    print(f"  - Accuracy: {results['dip_accuracy']:.2f}%")
+    print(f"  - Precision: {results['dip_precision']:.2f}%")
+    print(f"  - Recall: {results['dip_recall']:.2f}%")
+    print("="*50)
+    
+    # Plot results
+    plot_results(train_losses, val_losses, results)
+    
+    # Save model
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'scaler_X': scaler_X,
+        'scaler_y': scaler_y,
+        'seq_length': seq_length,
+        'metrics': results
+    }, 'lstm_pressure_model.pth')
+    print("\nModel saved as 'lstm_pressure_model.pth'")
+    
+    return model, results
+
+if __name__ == "__main__":
+    model, results = main()
