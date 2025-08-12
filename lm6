@@ -1,0 +1,81 @@
+# Change these parameters at the top of your file:
+HIDDEN_SIZE = 32  # Reduced from 64
+NUM_LAYERS = 1    # Reduced from 2  
+DROPOUT = 0.5     # Increased from 0.2
+LEARNING_RATE = 0.0005 
+
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=32, num_layers=1, dropout=0.5):
+        super(LSTMModel, self).__init__()
+        
+        # Simpler LSTM
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=0)
+        
+        # Heavier regularization
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense1 = nn.Linear(hidden_size, 16)  # Smaller layer
+        self.relu = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(16, 1)
+        
+    def forward(self, x):
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        
+        x = self.dropout1(last_output)  # Dropout BEFORE dense
+        x = self.dense1(x)
+        x = self.relu(x)
+        x = self.dropout2(x)
+        x = self.dense2(x)
+        
+        return x
+
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size):
+    criterion = nn.MSELoss()
+    # Add weight_decay for L2 regularization
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=0.01)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', 
+                                                     patience=5, factor=0.5)  # More aggressive
+    
+    # ... rest of your training code ...
+    
+    # Add early stopping with lower patience
+    best_val_loss = float('inf')
+    patience = 10  # Reduced from 15
+    patience_counter = 0
+    
+    # In your training loop, add:
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_model_state = model.state_dict().copy()
+        patience_counter = 0
+    else:
+        patience_counter += 1
+        
+    if patience_counter >= patience:
+        print(f"Early stopping at epoch {epoch+1}")
+        model.load_state_dict(best_model_state)
+        break
+
+
+# SECTION 7: Replace your current split with time-based splitting
+# This prevents future data from leaking into training
+
+# Add a gap between train and validation to prevent leakage
+gap = 50  # Skip 50 samples between train and val
+
+train_end = int(len(X) * 0.7)
+val_start = train_end + gap
+val_end = val_start + int(len(X) * 0.15)
+
+X_train = X[:train_end]
+y_train = y[:train_end]
+X_val = X[val_start:val_end]
+y_val = y[val_start:val_end]
+X_test = X[val_end:]
+y_test = y[val_end:]
+
+print(f"Train: 0-{train_end}, Val: {val_start}-{val_end}, Test: {val_end}-{len(X)}")
+print(f"Gap of {gap} samples between train and validation")
+
