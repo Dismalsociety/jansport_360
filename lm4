@@ -1,0 +1,645 @@
+# OVERFITTING DIAGNOSTIC TOOLKIT
+# This script provides comprehensive diagnostics for persistent overfitting issues
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, KFold
+from scipy import stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+warnings.filterwarnings('ignore')
+from collections import defaultdict
+import copy
+
+# Set style for better plots
+plt.style.use('seaborn-v0_8-darkgrid')
+sns.set_palette("husl")
+
+# SECTION 1: Settings
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+SEQ_LENGTH = 50
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+DIAGNOSTIC_EPOCHS = 100
+DETAILED_EPOCHS = 10  # First N epochs to monitor in detail
+
+
+# SECTION 2: Data Loading and Preprocessing
+def load_and_prepare_data(file_path='swash_plate_pump_data (7).csv'):
+    """Load and prepare data with diagnostic information"""
+    
+    df = pd.read_csv(file_path)
+    flow_rate = df['Flow Rate (GPM)'].values
+    pressure = df['Pressure (PSI)'].values
+    
+    print("="*80)
+    print("DATA DIAGNOSTICS")
+    print("="*80)
+    
+    # Check for missing values
+    print(f"\n1. Missing Values:")
+    print(f"   Flow Rate: {np.isnan(flow_rate).sum()}")
+    print(f"   Pressure: {np.isnan(pressure).sum()}")
+    
+    # Check for outliers using IQR method
+    def detect_outliers(data, name):
+        Q1 = np.percentile(data, 25)
+        Q3 = np.percentile(data, 75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        outliers = (data < lower_bound) | (data > upper_bound)
+        print(f"   {name}: {outliers.sum()} outliers ({outliers.sum()/len(data)*100:.2f}%)")
+        return outliers
+    
+    print(f"\n2. Outlier Detection (IQR method):")
+    flow_outliers = detect_outliers(flow_rate, "Flow Rate")
+    pressure_outliers = detect_outliers(pressure, "Pressure")
+    
+    # Statistical properties
+    print(f"\n3. Statistical Properties:")
+    print(f"   Flow Rate: mean={flow_rate.mean():.2f}, std={flow_rate.std():.2f}, "
+          f"skew={stats.skew(flow_rate):.2f}, kurtosis={stats.kurtosis(flow_rate):.2f}")
+    print(f"   Pressure: mean={pressure.mean():.2f}, std={pressure.std():.2f}, "
+          f"skew={stats.skew(pressure):.2f}, kurtosis={stats.kurtosis(pressure):.2f}")
+    
+    # Check for temporal patterns
+    print(f"\n4. Temporal Patterns:")
+    autocorr_flow = np.corrcoef(flow_rate[:-1], flow_rate[1:])[0, 1]
+    autocorr_pressure = np.corrcoef(pressure[:-1], pressure[1:])[0, 1]
+    print(f"   Flow Rate autocorrelation: {autocorr_flow:.3f}")
+    print(f"   Pressure autocorrelation: {autocorr_pressure:.3f}")
+    
+    return flow_rate, pressure
+
+
+# SECTION 3: Advanced Sequence Creation with Diagnostics
+def create_sequences_with_diagnostics(flow_rate, pressure, seq_length=50):
+    """Create sequences and check for data leakage"""
+    
+    # Normalize data
+    scaler_X = StandardScaler()
+    scaler_y = StandardScaler()
+    
+    flow_normalized = scaler_X.fit_transform(flow_rate.reshape(-1, 1)).flatten()
+    pressure_normalized = scaler_y.fit_transform(pressure.reshape(-1, 1)).flatten()
+    
+    # Create sequences
+    X, y = [], []
+    for i in range(len(flow_normalized) - seq_length):
+        X.append(flow_normalized[i:i+seq_length])
+        y.append(pressure_normalized[i+seq_length])
+    
+    X = np.array(X)
+    y = np.array(y)
+    
+    print(f"\n5. Sequence Creation:")
+    print(f"   Total sequences: {len(X)}")
+    print(f"   Sequence shape: {X.shape}")
+    print(f"   Target shape: {y.shape}")
+    
+    # Check for data leakage (overlapping sequences)
+    print(f"\n6. Data Leakage Check:")
+    print(f"   Overlapping sequences: Yes (sliding window)")
+    print(f"   This can cause overfitting in time series!")
+    print(f"   Consider using non-overlapping windows or careful time-based splitting")
+    
+    return X, y, scaler_X, scaler_y
+
+
+# SECTION 4: Distribution Analysis
+def analyze_distributions(X_train, y_train, X_val, y_val, name=""):
+    """Analyze and compare distributions between train and validation sets"""
+    
+    print(f"\n{'='*80}")
+    print(f"DISTRIBUTION ANALYSIS {name}")
+    print(f"{'='*80}")
+    
+    # Feature distribution comparison (using mean of sequences for X)
+    X_train_mean = X_train.mean(axis=1)
+    X_val_mean = X_val.mean(axis=1)
+    
+    # Kolmogorov-Smirnov test for distribution similarity
+    ks_stat_X, ks_p_X = stats.ks_2samp(X_train_mean, X_val_mean)
+    ks_stat_y, ks_p_y = stats.ks_2samp(y_train, y_val)
+    
+    print(f"\n1. Kolmogorov-Smirnov Test (are distributions similar?):")
+    print(f"   Features: KS-stat={ks_stat_X:.4f}, p-value={ks_p_X:.4f}")
+    print(f"   Targets: KS-stat={ks_stat_y:.4f}, p-value={ks_p_y:.4f}")
+    
+    if ks_p_X < 0.05 or ks_p_y < 0.05:
+        print("   ⚠️ WARNING: Distributions are significantly different (p < 0.05)")
+        print("   This can cause overfitting!")
+    else:
+        print("   ✓ Distributions are similar")
+    
+    # Statistical moments comparison
+    print(f"\n2. Statistical Moments:")
+    print(f"   Train X: mean={X_train_mean.mean():.4f}, std={X_train_mean.std():.4f}")
+    print(f"   Val X:   mean={X_val_mean.mean():.4f}, std={X_val_mean.std():.4f}")
+    print(f"   Train y: mean={y_train.mean():.4f}, std={y_train.std():.4f}")
+    print(f"   Val y:   mean={y_val.mean():.4f}, std={y_val.std():.4f}")
+    
+    # Check for class imbalance (for regression, check target distribution)
+    print(f"\n3. Target Distribution Analysis:")
+    y_train_percentiles = np.percentile(y_train, [0, 25, 50, 75, 100])
+    y_val_percentiles = np.percentile(y_val, [0, 25, 50, 75, 100])
+    
+    print(f"   Train percentiles: {y_train_percentiles}")
+    print(f"   Val percentiles:   {y_val_percentiles}")
+    
+    # Plot distributions
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle(f'Distribution Comparison {name}', fontsize=14)
+    
+    # Feature distributions
+    axes[0, 0].hist(X_train_mean, bins=30, alpha=0.5, label='Train', density=True)
+    axes[0, 0].hist(X_val_mean, bins=30, alpha=0.5, label='Val', density=True)
+    axes[0, 0].set_title('Feature Distribution (Sequence Means)')
+    axes[0, 0].set_xlabel('Value')
+    axes[0, 0].set_ylabel('Density')
+    axes[0, 0].legend()
+    
+    # Target distributions
+    axes[0, 1].hist(y_train, bins=30, alpha=0.5, label='Train', density=True)
+    axes[0, 1].hist(y_val, bins=30, alpha=0.5, label='Val', density=True)
+    axes[0, 1].set_title('Target Distribution')
+    axes[0, 1].set_xlabel('Pressure (normalized)')
+    axes[0, 1].set_ylabel('Density')
+    axes[0, 1].legend()
+    
+    # Q-Q plots
+    stats.probplot(X_train_mean, dist="norm", plot=axes[1, 0])
+    axes[1, 0].set_title('Q-Q Plot: Train Features')
+    
+    stats.probplot(y_train, dist="norm", plot=axes[1, 1])
+    axes[1, 1].set_title('Q-Q Plot: Train Targets')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return ks_p_X < 0.05 or ks_p_y < 0.05
+
+
+# SECTION 5: Stratified Split for Regression
+def stratified_split_regression(X, y, test_size=0.2, n_bins=10):
+    """Create stratified split for regression by binning target values"""
+    
+    # Create bins for stratification
+    y_binned = pd.qcut(y, q=n_bins, labels=False, duplicates='drop')
+    
+    # Perform stratified split
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y_binned, random_state=42
+    )
+    
+    print(f"\n7. Stratified Split (based on {n_bins} target bins):")
+    print(f"   Train size: {len(X_train)}")
+    print(f"   Test size: {len(X_test)}")
+    
+    return X_train, X_test, y_train, y_test
+
+
+# SECTION 6: Simple Model for Diagnostics
+class DiagnosticModel(nn.Module):
+    """Simple model for diagnostic purposes"""
+    def __init__(self, input_size=50, hidden_size=32):
+        super(DiagnosticModel, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size, 16),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(16, 1)
+        )
+    
+    def forward(self, x):
+        return self.layers(x)
+
+
+# SECTION 7: Detailed Training Monitor
+def train_with_detailed_monitoring(model, X_train, y_train, X_val, y_val, 
+                                  epochs=100, detailed_epochs=10):
+    """Train with detailed monitoring of early epochs"""
+    
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    detailed_history = {
+        'iteration': [],
+        'train_loss': [],
+        'val_loss': [],
+        'epoch': []
+    }
+    
+    regular_history = {
+        'train_loss': [],
+        'val_loss': []
+    }
+    
+    iteration = 0
+    
+    for epoch in range(epochs):
+        model.train()
+        epoch_losses = []
+        
+        # Shuffle data
+        indices = torch.randperm(len(X_train))
+        X_train_shuffled = X_train[indices]
+        y_train_shuffled = y_train[indices]
+        
+        for i in range(0, len(X_train), BATCH_SIZE):
+            batch_X = X_train_shuffled[i:i+BATCH_SIZE]
+            batch_y = y_train_shuffled[i:i+BATCH_SIZE]
+            
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs.squeeze(), batch_y)
+            loss.backward()
+            optimizer.step()
+            
+            epoch_losses.append(loss.item())
+            
+            # Detailed monitoring for early epochs
+            if epoch < detailed_epochs and iteration % 5 == 0:
+                model.eval()
+                with torch.no_grad():
+                    val_outputs = model(X_val)
+                    val_loss = criterion(val_outputs.squeeze(), y_val)
+                    
+                    detailed_history['iteration'].append(iteration)
+                    detailed_history['train_loss'].append(loss.item())
+                    detailed_history['val_loss'].append(val_loss.item())
+                    detailed_history['epoch'].append(epoch)
+                model.train()
+            
+            iteration += 1
+        
+        # Regular epoch monitoring
+        avg_train_loss = np.mean(epoch_losses)
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val)
+            val_loss = criterion(val_outputs.squeeze(), y_val)
+        
+        regular_history['train_loss'].append(avg_train_loss)
+        regular_history['val_loss'].append(val_loss.item())
+        
+        if epoch % 20 == 0:
+            print(f"Epoch {epoch}/{epochs}: Train Loss={avg_train_loss:.6f}, Val Loss={val_loss:.6f}")
+    
+    return detailed_history, regular_history
+
+
+# SECTION 8: Train/Val Swap Experiment
+def swap_experiment(X, y):
+    """Swap training and validation sets to check if overfitting persists"""
+    
+    print("\n" + "="*80)
+    print("TRAIN/VALIDATION SWAP EXPERIMENT")
+    print("="*80)
+    
+    # Original split
+    X_train_orig, X_val_orig, y_train_orig, y_val_orig = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    
+    # Convert to tensors
+    X_train_orig = torch.FloatTensor(X_train_orig).to(device)
+    y_train_orig = torch.FloatTensor(y_train_orig).to(device)
+    X_val_orig = torch.FloatTensor(X_val_orig).to(device)
+    y_val_orig = torch.FloatTensor(y_val_orig).to(device)
+    
+    # Train with original split
+    print("\n1. Original Split (80% train, 20% val):")
+    model_orig = DiagnosticModel().to(device)
+    detailed_orig, regular_orig = train_with_detailed_monitoring(
+        model_orig, X_train_orig, y_train_orig, X_val_orig, y_val_orig,
+        epochs=50, detailed_epochs=10
+    )
+    
+    # Swapped split (use validation as training)
+    print("\n2. Swapped Split (20% as train, 80% as val):")
+    model_swap = DiagnosticModel().to(device)
+    detailed_swap, regular_swap = train_with_detailed_monitoring(
+        model_swap, X_val_orig, y_val_orig, X_train_orig, y_train_orig,
+        epochs=50, detailed_epochs=10
+    )
+    
+    # Analyze results
+    print("\n3. Analysis:")
+    orig_overfit = regular_orig['val_loss'][-1] / regular_orig['train_loss'][-1]
+    swap_overfit = regular_swap['val_loss'][-1] / regular_swap['train_loss'][-1]
+    
+    print(f"   Original: Final Train Loss={regular_orig['train_loss'][-1]:.6f}, "
+          f"Val Loss={regular_orig['val_loss'][-1]:.6f}, Ratio={orig_overfit:.3f}")
+    print(f"   Swapped:  Final Train Loss={regular_swap['train_loss'][-1]:.6f}, "
+          f"Val Loss={regular_swap['val_loss'][-1]:.6f}, Ratio={swap_overfit:.3f}")
+    
+    if orig_overfit > 1.2 and swap_overfit < 1.1:
+        print("\n   ⚠️ ISSUE DETECTED: Overfitting changes with swap!")
+        print("   → Likely cause: Distribution differences between splits")
+        print("   → Solution: Use stratified splitting or time-based splitting")
+    elif orig_overfit > 1.2 and swap_overfit > 1.2:
+        print("\n   ⚠️ ISSUE DETECTED: Overfitting persists after swap!")
+        print("   → Likely cause: Model complexity or insufficient data")
+        print("   → Solution: Simplify model, add regularization, or get more data")
+    else:
+        print("\n   ✓ No significant overfitting detected")
+    
+    return detailed_orig, regular_orig, detailed_swap, regular_swap
+
+
+# SECTION 9: Early Epoch Analysis
+def analyze_early_epochs(detailed_history):
+    """Analyze early epoch behavior for initialization issues"""
+    
+    print("\n" + "="*80)
+    print("EARLY EPOCH ANALYSIS")
+    print("="*80)
+    
+    if len(detailed_history['iteration']) > 0:
+        initial_train = detailed_history['train_loss'][0]
+        initial_val = detailed_history['val_loss'][0]
+        
+        print(f"\n1. Initial Losses (iteration 0):")
+        print(f"   Train Loss: {initial_train:.6f}")
+        print(f"   Val Loss: {initial_val:.6f}")
+        print(f"   Ratio: {initial_val/initial_train:.3f}")
+        
+        if initial_val/initial_train > 1.5:
+            print("   ⚠️ WARNING: Large initial gap between train and val loss!")
+            print("   → Possible causes: Bad initialization, distribution mismatch")
+        
+        # Check if validation loss starts very low
+        if initial_val < 0.1:
+            print("   ⚠️ WARNING: Validation loss starts very low!")
+            print("   → Possible causes: Data leakage, similar train/val samples")
+        
+        # Analyze trend in first few iterations
+        first_10 = min(10, len(detailed_history['iteration']))
+        train_trend = np.polyfit(range(first_10), detailed_history['train_loss'][:first_10], 1)[0]
+        val_trend = np.polyfit(range(first_10), detailed_history['val_loss'][:first_10], 1)[0]
+        
+        print(f"\n2. Early Trends (first {first_10} iterations):")
+        print(f"   Train Loss trend: {train_trend:.6f}")
+        print(f"   Val Loss trend: {val_trend:.6f}")
+        
+        if train_trend < 0 and val_trend > 0:
+            print("   ⚠️ WARNING: Train decreasing while val increasing from start!")
+            print("   → Strong indication of overfitting or distribution mismatch")
+
+
+# SECTION 10: Time-Based Split for Time Series
+def time_based_split(X, y, test_size=0.2):
+    """Use time-based split to avoid data leakage in time series"""
+    
+    split_idx = int(len(X) * (1 - test_size))
+    
+    X_train = X[:split_idx]
+    X_test = X[split_idx:]
+    y_train = y[:split_idx]
+    y_test = y[split_idx:]
+    
+    print(f"\n8. Time-Based Split:")
+    print(f"   Train: samples 0 to {split_idx-1}")
+    print(f"   Test: samples {split_idx} to {len(X)-1}")
+    print(f"   This prevents future data leaking into training!")
+    
+    return X_train, X_test, y_train, y_test
+
+
+# SECTION 11: Main Diagnostic Pipeline
+def run_complete_diagnostics():
+    """Run complete diagnostic pipeline"""
+    
+    print("="*80)
+    print("COMPREHENSIVE OVERFITTING DIAGNOSTICS")
+    print("="*80)
+    
+    # Load and analyze data
+    flow_rate, pressure = load_and_prepare_data()
+    
+    # Create sequences
+    X, y, scaler_X, scaler_y = create_sequences_with_diagnostics(flow_rate, pressure)
+    
+    # Try different splitting strategies
+    print("\n" + "="*80)
+    print("SPLITTING STRATEGY COMPARISON")
+    print("="*80)
+    
+    # 1. Random split (original)
+    print("\n--- Random Split ---")
+    X_train_random, X_test_random, y_train_random, y_test_random = train_test_split(
+        X, y, test_size=0.2, random_state=42
+    )
+    has_distribution_issue_random = analyze_distributions(
+        X_train_random, y_train_random, 
+        X_test_random, y_test_random,
+        name="(Random Split)"
+    )
+    
+    # 2. Stratified split
+    print("\n--- Stratified Split ---")
+    X_train_strat, X_test_strat, y_train_strat, y_test_strat = stratified_split_regression(
+        X, y, test_size=0.2
+    )
+    has_distribution_issue_strat = analyze_distributions(
+        X_train_strat, y_train_strat,
+        X_test_strat, y_test_strat,
+        name="(Stratified Split)"
+    )
+    
+    # 3. Time-based split
+    print("\n--- Time-Based Split ---")
+    X_train_time, X_test_time, y_train_time, y_test_time = time_based_split(
+        X, y, test_size=0.2
+    )
+    has_distribution_issue_time = analyze_distributions(
+        X_train_time, y_train_time,
+        X_test_time, y_test_time,
+        name="(Time-Based Split)"
+    )
+    
+    # Run swap experiment
+    detailed_orig, regular_orig, detailed_swap, regular_swap = swap_experiment(X, y)
+    
+    # Analyze early epochs
+    analyze_early_epochs(detailed_orig)
+    
+    # Visualization of all diagnostics
+    fig = plt.figure(figsize=(16, 12))
+    
+    # Plot 1: Early epoch details
+    ax1 = plt.subplot(3, 3, 1)
+    ax1.plot(detailed_orig['iteration'], detailed_orig['train_loss'], 
+             label='Train', alpha=0.7, linewidth=1)
+    ax1.plot(detailed_orig['iteration'], detailed_orig['val_loss'], 
+             label='Val', alpha=0.7, linewidth=1)
+    ax1.set_title('Early Training Details (Original)')
+    ax1.set_xlabel('Iteration')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Regular training curves (original)
+    ax2 = plt.subplot(3, 3, 2)
+    ax2.plot(regular_orig['train_loss'], label='Train', alpha=0.7)
+    ax2.plot(regular_orig['val_loss'], label='Val', alpha=0.7)
+    ax2.set_title('Full Training (Original Split)')
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Loss')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Regular training curves (swapped)
+    ax3 = plt.subplot(3, 3, 3)
+    ax3.plot(regular_swap['train_loss'], label='Train', alpha=0.7)
+    ax3.plot(regular_swap['val_loss'], label='Val', alpha=0.7)
+    ax3.set_title('Full Training (Swapped Split)')
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('Loss')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Loss ratio evolution
+    ax4 = plt.subplot(3, 3, 4)
+    ratio_orig = [v/t for v, t in zip(regular_orig['val_loss'], regular_orig['train_loss'])]
+    ratio_swap = [v/t for v, t in zip(regular_swap['val_loss'], regular_swap['train_loss'])]
+    ax4.plot(ratio_orig, label='Original', alpha=0.7)
+    ax4.plot(ratio_swap, label='Swapped', alpha=0.7)
+    ax4.axhline(y=1.0, color='g', linestyle='--', alpha=0.5, label='No Overfit')
+    ax4.axhline(y=1.2, color='r', linestyle='--', alpha=0.5, label='Overfit Threshold')
+    ax4.set_title('Val/Train Loss Ratio')
+    ax4.set_xlabel('Epoch')
+    ax4.set_ylabel('Ratio')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    # Plot 5: Target distribution by split strategy
+    ax5 = plt.subplot(3, 3, 5)
+    ax5.hist(y_train_random, bins=30, alpha=0.3, label='Random Train', density=True)
+    ax5.hist(y_train_strat, bins=30, alpha=0.3, label='Stratified Train', density=True)
+    ax5.hist(y_train_time, bins=30, alpha=0.3, label='Time Train', density=True)
+    ax5.set_title('Training Target Distributions')
+    ax5.set_xlabel('Target Value')
+    ax5.set_ylabel('Density')
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    
+    # Plot 6: Autocorrelation analysis
+    ax6 = plt.subplot(3, 3, 6)
+    lags = range(1, min(50, len(y)//10))
+    autocorrs = [np.corrcoef(y[:-lag], y[lag:])[0, 1] for lag in lags]
+    ax6.plot(lags, autocorrs, 'b-', alpha=0.7)
+    ax6.axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    ax6.set_title('Target Autocorrelation')
+    ax6.set_xlabel('Lag')
+    ax6.set_ylabel('Correlation')
+    ax6.grid(True, alpha=0.3)
+    
+    # Plot 7: Data point density over time
+    ax7 = plt.subplot(3, 3, 7)
+    ax7.scatter(range(len(y)), y, alpha=0.3, s=1)
+    ax7.axvline(x=len(y_train_time), color='r', linestyle='--', alpha=0.5, label='Time Split')
+    ax7.set_title('Target Values Over Time')
+    ax7.set_xlabel('Sample Index')
+    ax7.set_ylabel('Target Value')
+    ax7.legend()
+    ax7.grid(True, alpha=0.3)
+    
+    # Plot 8: Feature importance proxy (variance per position)
+    ax8 = plt.subplot(3, 3, 8)
+    position_variance = X.var(axis=0)
+    ax8.plot(position_variance, alpha=0.7)
+    ax8.set_title('Feature Variance by Sequence Position')
+    ax8.set_xlabel('Position in Sequence')
+    ax8.set_ylabel('Variance')
+    ax8.grid(True, alpha=0.3)
+    
+    # Plot 9: Summary statistics
+    ax9 = plt.subplot(3, 3, 9)
+    ax9.axis('off')
+    
+    summary_text = "DIAGNOSTIC SUMMARY\n" + "="*30 + "\n\n"
+    
+    if has_distribution_issue_random:
+        summary_text += "❌ Random split has distribution issues\n"
+    else:
+        summary_text += "✓ Random split OK\n"
+    
+    if has_distribution_issue_strat:
+        summary_text += "❌ Stratified split has distribution issues\n"
+    else:
+        summary_text += "✓ Stratified split OK\n"
+        
+    if has_distribution_issue_time:
+        summary_text += "⚠️ Time split has distribution issues\n   (Expected for time series)\n"
+    else:
+        summary_text += "✓ Time split OK\n"
+    
+    if ratio_orig[-1] > 1.2:
+        summary_text += "\n❌ Overfitting detected (ratio > 1.2)\n"
+    else:
+        summary_text += "\n✓ No significant overfitting\n"
+    
+    if abs(ratio_orig[-1] - ratio_swap[-1]) > 0.3:
+        summary_text += "❌ Swap test failed (inconsistent)\n"
+    else:
+        summary_text += "✓ Swap test passed (consistent)\n"
+    
+    summary_text += "\n" + "="*30 + "\n"
+    summary_text += "RECOMMENDATIONS:\n"
+    
+    if has_distribution_issue_random and not has_distribution_issue_strat:
+        summary_text += "• Use stratified splitting\n"
+    
+    if max(autocorrs) > 0.7:
+        summary_text += "• High autocorrelation detected\n"
+        summary_text += "• Use time-based splitting\n"
+        summary_text += "• Consider larger sequence gaps\n"
+    
+    if ratio_orig[-1] > 1.2:
+        summary_text += "• Reduce model complexity\n"
+        summary_text += "• Add more regularization\n"
+        summary_text += "• Increase dropout rates\n"
+    
+    ax9.text(0.1, 0.5, summary_text, fontsize=10, verticalalignment='center',
+             fontfamily='monospace')
+    
+    plt.suptitle('Comprehensive Overfitting Diagnostics', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+    
+    return {
+        'distribution_issues': {
+            'random': has_distribution_issue_random,
+            'stratified': has_distribution_issue_strat,
+            'time': has_distribution_issue_time
+        },
+        'swap_experiment': {
+            'original_ratio': ratio_orig[-1],
+            'swapped_ratio': ratio_swap[-1]
+        },
+        'autocorrelation': max(autocorrs),
+        'recommendations': summary_text
+    }
+
+
+# SECTION 12: Run diagnostics
+if __name__ == "__main__":
+    results = run_complete_diagnostics()
+    
+    print("\n" + "="*80)
+    print("FINAL RECOMMENDATIONS BASED ON DIAGNOSTICS")
+    print("="*80)
+    print(results['recommendations'])
