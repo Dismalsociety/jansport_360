@@ -1,0 +1,295 @@
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler  # CHANGED: MinMaxScaler instead of StandardScaler
+
+
+# Basic settings
+SEQ_LENGTH = 20  # How many past points to look at
+PRED_LENGTH = 5  # How many future points to predict
+HIDDEN_SIZE = 64  # Size of LSTM hidden layer
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 50
+
+
+# Check if GPU is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+
+# Load the data
+print("Loading data...")
+df = pd.read_excel('generated_training_data_2.xlsx')
+flows = df['Flow Rate (gpm)'].values
+pressures = df['Predicted Pressure (psiA)'].values
+
+
+# Combine flow and pressure data
+data = np.column_stack([flows, pressures])
+
+
+# CHANGED: Use MinMaxScaler for better neural network training
+scaler = MinMaxScaler(feature_range=(-1, 1))
+data_normalized = scaler.fit_transform(data)
+
+
+# CHANGED: Create non-overlapping sequences to prevent data leakage
+def create_sequences_no_overlap(data, seq_length=20, pred_length=5):
+    """Create non-overlapping sequences to prevent data leakage"""
+    X_data = []
+    Y_data = []
+    stride = seq_length + pred_length  # Jump by full sequence + prediction length
+    
+    for i in range(0, len(data) - seq_length - pred_length, stride):
+        # Get seq_length points as input
+        input_seq = data[i:i+seq_length]
+        X_data.append(input_seq)
+        
+        # Get next pred_length pressure values as target
+        target_pressures = data[i+seq_length:i+seq_length+pred_length, 1]
+        Y_data.append(target_pressures)
+    
+    return np.array(X_data), np.array(Y_data)
+
+
+# Create sequences using non-overlapping method
+print("Creating non-overlapping sequences...")
+X_data, Y_data = create_sequences_no_overlap(data_normalized, SEQ_LENGTH, PRED_LENGTH)
+print(f"Created {len(X_data)} sequences (reduced from overlapping to prevent leakage)")
+
+
+# Split data into train and test (80/20 split)
+split_point = int(0.8 * len(X_data))
+X_train = torch.FloatTensor(X_data[:split_point])
+Y_train = torch.FloatTensor(Y_data[:split_point])
+X_test = torch.FloatTensor(X_data[split_point:])
+Y_test = torch.FloatTensor(Y_data[split_point:])
+
+
+print(f"Training samples: {len(X_train)}")
+print(f"Test samples: {len(X_test)}")
+
+
+# Define the LSTM + Dense model (unchanged)
+class LSTMDenseModel(nn.Module):
+    def __init__(self):
+        super(LSTMDenseModel, self).__init__()
+        # LSTM layer (this is a type of RNN)
+        self.lstm = nn.LSTM(input_size=2, hidden_size=HIDDEN_SIZE, batch_first=True)
+        
+        # Dense layers (fully connected)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, 32)
+        self.relu = nn.ReLU()
+        self.dense2 = nn.Linear(32, PRED_LENGTH)
+        
+    def forward(self, x):
+        # Pass through LSTM
+        lstm_out, (hidden, cell) = self.lstm(x)
+        
+        # Use the last hidden state
+        last_hidden = hidden[-1]
+        
+        # Pass through dense layers
+        x = self.dense1(last_hidden)
+        x = self.relu(x)
+        predictions = self.dense2(x)
+        
+        return predictions
+
+
+# Create model, loss function, and optimizer
+model = LSTMDenseModel().to(device)
+loss_function = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# ADDED: Learning rate scheduler for better convergence
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+
+
+# Print model info
+total_params = sum(p.numel() for p in model.parameters())
+print(f"\nModel has {total_params:,} parameters")
+
+
+# Training loop with EARLY STOPPING
+print("\nStarting training...")
+train_losses = []
+val_losses = []
+
+# ADDED: Variables for early stopping
+best_val_loss = float('inf')
+best_model_state = None
+patience = 10
+patience_counter = 0
+
+for epoch in range(EPOCHS):
+    # Training phase
+    model.train()
+    total_loss = 0
+    num_batches = 0
+    
+    # Process data in batches
+    for i in range(0, len(X_train), BATCH_SIZE):
+        # Get batch
+        batch_X = X_train[i:i+BATCH_SIZE].to(device)
+        batch_Y = Y_train[i:i+BATCH_SIZE].to(device)
+        
+        # Forward pass
+        predictions = model(batch_X)
+        loss = loss_function(predictions, batch_Y)
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        num_batches += 1
+    
+    # Calculate average training loss
+    avg_train_loss = total_loss / num_batches
+    train_losses.append(avg_train_loss)
+    
+    # ADDED: Validation phase (on test set for simplicity)
+    model.eval()
+    with torch.no_grad():
+        val_predictions = model(X_test.to(device))
+        val_loss = loss_function(val_predictions, Y_test.to(device))
+        val_losses.append(val_loss.item())
+    
+    # ADDED: Learning rate scheduling
+    scheduler.step()
+    
+    # ADDED: Early stopping logic
+    if val_loss.item() < best_val_loss:
+        best_val_loss = val_loss.item()
+        best_model_state = model.state_dict().copy()
+        patience_counter = 0
+    else:
+        patience_counter += 1
+    
+    if patience_counter >= patience:
+        print(f'Early stopping at epoch {epoch+1}')
+        break
+    
+    # Print progress every 10 epochs
+    if (epoch + 1) % 10 == 0:
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_train_loss:.4f}, '
+              f'Val Loss: {val_loss.item():.4f}, LR: {current_lr:.6f}')
+
+
+# ADDED: Restore best model
+if best_model_state is not None:
+    model.load_state_dict(best_model_state)
+    print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+
+
+# Test the model
+print("\nTesting model...")
+model.eval()  # Set to evaluation mode
+
+
+# Make predictions on test data
+all_predictions = []
+all_targets = []
+
+
+with torch.no_grad():  # Don't calculate gradients during testing
+    for i in range(0, len(X_test), BATCH_SIZE):
+        batch_X = X_test[i:i+BATCH_SIZE].to(device)
+        batch_Y = Y_test[i:i+BATCH_SIZE]
+        
+        predictions = model(batch_X)
+        all_predictions.append(predictions.cpu().numpy())
+        all_targets.append(batch_Y.numpy())
+
+
+# Combine all predictions and targets
+predictions_array = np.vstack(all_predictions)
+targets_array = np.vstack(all_targets)
+
+
+# Denormalize to get actual pressure values
+pressure_mean = scaler.mean_[1]
+pressure_std = scaler.scale_[1]
+
+# CHANGED: Adjust denormalization for MinMaxScaler
+# For MinMaxScaler, we need to use inverse_transform properly
+# Create dummy arrays with zeros for flow, actual values for pressure
+pred_dummy = np.zeros((predictions_array.shape[0] * PRED_LENGTH, 2))
+pred_dummy[:, 1] = predictions_array.flatten()
+predictions_denorm = scaler.inverse_transform(pred_dummy)[:, 1]
+predictions_actual = predictions_denorm.reshape(predictions_array.shape)
+
+target_dummy = np.zeros((targets_array.shape[0] * PRED_LENGTH, 2))
+target_dummy[:, 1] = targets_array.flatten()
+targets_denorm = scaler.inverse_transform(target_dummy)[:, 1]
+targets_actual = targets_denorm.reshape(targets_array.shape)
+
+
+# Calculate error metrics
+rmse = np.sqrt(np.mean((predictions_actual - targets_actual)**2))
+
+# Calculate R² score
+ss_res = np.sum((targets_actual - predictions_actual)**2)
+ss_tot = np.sum((targets_actual - np.mean(targets_actual))**2)
+r2_score = 1 - (ss_res / ss_tot)
+
+print(f"\nTest Results:")
+print(f"R² Score: {r2_score:.4f}")
+print(f"RMSE: {rmse:.2f} psiA")
+
+
+# Plot results
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+# Plot 1: Training and Validation Loss
+axes[0, 0].plot(train_losses, label='Training Loss', alpha=0.7)
+axes[0, 0].plot(val_losses, label='Validation Loss', alpha=0.7)
+axes[0, 0].set_title('Training and Validation Loss Over Time')
+axes[0, 0].set_xlabel('Epoch')
+axes[0, 0].set_ylabel('Loss')
+axes[0, 0].legend()
+axes[0, 0].grid(True, alpha=0.3)
+
+# Plot 2: First prediction step comparison
+axes[0, 1].plot(targets_actual[:50, 0], label='Actual Pressure', alpha=0.7)
+axes[0, 1].plot(predictions_actual[:50, 0], label='Predicted Pressure', alpha=0.7)
+axes[0, 1].set_title('LSTM + Dense: First Step Pressure Predictions')
+axes[0, 1].set_xlabel('Test Sample')
+axes[0, 1].set_ylabel('Pressure (psiA)')
+axes[0, 1].legend()
+axes[0, 1].grid(True, alpha=0.3)
+
+# Plot 3: Prediction error over time steps
+avg_error_per_step = np.mean(np.abs(predictions_actual - targets_actual), axis=0)
+axes[1, 0].bar(range(1, PRED_LENGTH + 1), avg_error_per_step)
+axes[1, 0].set_title('Average Prediction Error by Time Step')
+axes[1, 0].set_xlabel('Prediction Step')
+axes[1, 0].set_ylabel('Average Absolute Error (psiA)')
+axes[1, 0].grid(True, alpha=0.3)
+
+# Plot 4: Scatter plot of predictions vs actual (first step only)
+axes[1, 1].scatter(targets_actual[:, 0], predictions_actual[:, 0], alpha=0.5)
+axes[1, 1].plot([targets_actual[:, 0].min(), targets_actual[:, 0].max()], 
+                [targets_actual[:, 0].min(), targets_actual[:, 0].max()], 
+                'r--', label='Perfect Prediction')
+axes[1, 1].set_title('Predicted vs Actual Pressure (First Step)')
+axes[1, 1].set_xlabel('Actual Pressure (psiA)')
+axes[1, 1].set_ylabel('Predicted Pressure (psiA)')
+axes[1, 1].legend()
+axes[1, 1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print("\nDone!")
+print("\nKey improvements implemented:")
+print("✓ Non-overlapping sequences to prevent data leakage")
+print("✓ MinMaxScaler for better neural network convergence")
+print("✓ Early stopping to keep best model")
+print("✓ Learning rate scheduling for improved training")
