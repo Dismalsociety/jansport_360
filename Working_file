@@ -1,3 +1,5 @@
+# Non-overlapping sequences, MinMaxScaler, Early stopping, learning rate scheduling
+
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
