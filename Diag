@@ -1,0 +1,59 @@
+Learning Rate Too Low
+# Try higher learning rates
+LEARNING_RATE = 0.01  # or even 0.1
+# Or use adaptive learning rate
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=1e-4)
+
+Model Too Simple
+# Increase model capacity
+HIDDEN_SIZE = 128  # or 256
+NUM_LAYERS = 3     # add more layers
+
+Data Scaling Issues
+# Try different scalers
+scaler = StandardScaler()  # instead of MinMaxScaler
+# Or different ranges
+scaler = MinMaxScaler(feature_range=(0, 1))  # instead of (-1, 1)
+
+Sequence Length Too Short
+SEQ_LENGTH = 50  # or 100, give model more context
+
+Add Learning Rate Warmup
+# Gradual learning rate increase
+warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+    optimizer, start_factor=0.1, total_iters=10
+)
+
+
+
+
+Fix Data Leakage (Most Important)
+# Ensure truly non-overlapping sequences
+def create_sequences_no_overlap(data, seq_length, pred_length):
+    X_data, Y_data = [], []
+    step = seq_length + pred_length  # Full separation
+    for i in range(0, len(data) - seq_length - pred_length, step):
+        # Your sequence creation here
+    return np.array(X_data), np.array(Y_data)
+
+Proper Train/Validation Split
+# Split BEFORE creating sequences
+split_idx = int(0.8 * len(raw_data))
+train_data = raw_data[:split_idx]
+val_data = raw_data[split_idx:]
+
+# Then create sequences separately
+X_train, Y_train = create_sequences(train_data, ...)
+X_val, Y_val = create_sequences(val_data, ...)
+
+Time-Based Split for Time Series
+# For time series, always split chronologically
+# Never shuffle time series data before splitting
+split_point = int(0.8 * len(data))
+# Train on earlier data, validate on later data
+
+Check for Identical Samples
+# Remove duplicate sequences
+unique_indices = np.unique(X_data, axis=0, return_index=True)[1]
+X_data = X_data[unique_indices]
+Y_data = Y_data[unique_indices]
