@@ -1,11 +1,13 @@
 # Non-overlapping sequences, MinMaxScaler, Early stopping, learning rate scheduling
+# Multiple model comparison with RMSE and R² evaluation
 
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import MinMaxScaler  # CHANGED: MinMaxScaler instead of StandardScaler
+from sklearn.preprocessing import MinMaxScaler
+import copy
 
 
 # Basic settings
@@ -33,12 +35,12 @@ pressures = df['Predicted Pressure (psiA)'].values
 data = np.column_stack([flows, pressures])
 
 
-# CHANGED: Use MinMaxScaler for better neural network training
+# Use MinMaxScaler for better neural network training
 scaler = MinMaxScaler(feature_range=(-1, 1))
 data_normalized = scaler.fit_transform(data)
 
 
-# CHANGED: Create non-overlapping sequences to prevent data leakage
+# Create non-overlapping sequences to prevent data leakage
 def create_sequences_no_overlap(data, seq_length=20, pred_length=5):
     """Create non-overlapping sequences to prevent data leakage"""
     X_data = []
@@ -75,7 +77,7 @@ print(f"Training samples: {len(X_train)}")
 print(f"Test samples: {len(X_test)}")
 
 
-# Define the LSTM + Dense model (unchanged)
+# Model Definitions
 class LSTMDenseModel(nn.Module):
     def __init__(self):
         super(LSTMDenseModel, self).__init__()
@@ -102,189 +104,358 @@ class LSTMDenseModel(nn.Module):
         return predictions
 
 
-# Create model, loss function, and optimizer
-model = LSTMDenseModel().to(device)
-loss_function = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
-# ADDED: Learning rate scheduler for better convergence
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
-
-
-# Print model info
-total_params = sum(p.numel() for p in model.parameters())
-print(f"\nModel has {total_params:,} parameters")
-
-
-# Training loop with EARLY STOPPING
-print("\nStarting training...")
-train_losses = []
-val_losses = []
-
-# ADDED: Variables for early stopping
-best_val_loss = float('inf')
-best_model_state = None
-patience = 10
-patience_counter = 0
-
-for epoch in range(EPOCHS):
-    # Training phase
-    model.train()
-    total_loss = 0
-    num_batches = 0
-    
-    # Process data in batches
-    for i in range(0, len(X_train), BATCH_SIZE):
-        # Get batch
-        batch_X = X_train[i:i+BATCH_SIZE].to(device)
-        batch_Y = Y_train[i:i+BATCH_SIZE].to(device)
+class FNNModel(nn.Module):
+    def __init__(self):
+        super(FNNModel, self).__init__()
+        input_size = SEQ_LENGTH * 2  # flattened input sequence
         
-        # Forward pass
-        predictions = model(batch_X)
-        loss = loss_function(predictions, batch_Y)
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, HIDDEN_SIZE * 2),
+            nn.BatchNorm1d(HIDDEN_SIZE * 2),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(HIDDEN_SIZE * 2, HIDDEN_SIZE),
+            nn.BatchNorm1d(HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(HIDDEN_SIZE, 32),
+            nn.ReLU(),
+            nn.Linear(32, PRED_LENGTH)
+        )
         
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    def forward(self, x):
+        # Flatten the input sequence
+        x = x.view(x.size(0), -1)
+        return self.layers(x)
+
+
+class DenseRNNDenseModel(nn.Module):
+    def __init__(self):
+        super(DenseRNNDenseModel, self).__init__()
         
-        total_loss += loss.item()
-        num_batches += 1
+        # RNN layer
+        self.rnn = nn.RNN(2, HIDDEN_SIZE, batch_first=True)
+        
+        # Dense layers
+        self.dense1 = nn.Linear(HIDDEN_SIZE, 32)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.2)
+        self.dense2 = nn.Linear(32, PRED_LENGTH)
+        
+    def forward(self, x):
+        # RNN processing
+        rnn_out, _ = self.rnn(x)
+        
+        # Take the last output
+        x = rnn_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+class DenseLSTMDenseModel(nn.Module):
+    def __init__(self):
+        super(DenseLSTMDenseModel, self).__init__()
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(2, HIDDEN_SIZE, batch_first=True)
+        
+        # Dense layers
+        self.dense1 = nn.Linear(HIDDEN_SIZE, 32)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(0.2)
+        self.dense2 = nn.Linear(32, PRED_LENGTH)
+        
+    def forward(self, x):
+        # LSTM processing
+        lstm_out, _ = self.lstm(x)
+        
+        # Take the last output
+        x = lstm_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+class SimpleRNNModel(nn.Module):
+    def __init__(self):
+        super(SimpleRNNModel, self).__init__()
+        
+        # RNN layer
+        self.rnn = nn.RNN(2, HIDDEN_SIZE, batch_first=True)
+        
+        # Output layer
+        self.output = nn.Linear(HIDDEN_SIZE, PRED_LENGTH)
+        
+    def forward(self, x):
+        # RNN processing
+        rnn_out, _ = self.rnn(x)
+        
+        # Take the last output
+        x = rnn_out[:, -1, :]
+        
+        # Output layer
+        x = self.output(x)
+        
+        return x
+
+
+# Training function with early stopping and learning rate scheduling
+def train_model(model, model_name):
+    print(f"\nTraining {model_name}...")
     
-    # Calculate average training loss
-    avg_train_loss = total_loss / num_batches
-    train_losses.append(avg_train_loss)
+    loss_function = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
     
-    # ADDED: Validation phase (on test set for simplicity)
+    train_losses = []
+    val_losses = []
+    
+    # Early stopping variables
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience = 10
+    patience_counter = 0
+    
+    for epoch in range(EPOCHS):
+        # Training phase
+        model.train()
+        total_loss = 0
+        num_batches = 0
+        
+        # Process data in batches
+        for i in range(0, len(X_train), BATCH_SIZE):
+            batch_X = X_train[i:i+BATCH_SIZE].to(device)
+            batch_Y = Y_train[i:i+BATCH_SIZE].to(device)
+            
+            # Forward pass
+            predictions = model(batch_X)
+            loss = loss_function(predictions, batch_Y)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            num_batches += 1
+        
+        # Calculate average training loss
+        avg_train_loss = total_loss / num_batches
+        train_losses.append(avg_train_loss)
+        
+        # Validation phase (on test set for simplicity)
+        model.eval()
+        with torch.no_grad():
+            val_predictions = model(X_test.to(device))
+            val_loss = loss_function(val_predictions, Y_test.to(device))
+            val_losses.append(val_loss.item())
+        
+        # Learning rate scheduling
+        scheduler.step()
+        
+        # Early stopping logic
+        if val_loss.item() < best_val_loss:
+            best_val_loss = val_loss.item()
+            best_model_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            print(f'  Early stopping at epoch {epoch+1}')
+            break
+        
+        # Print progress every 20 epochs
+        if (epoch + 1) % 20 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f'  Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_train_loss:.4f}, '
+                  f'Val Loss: {val_loss.item():.4f}, LR: {current_lr:.6f}')
+    
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"  Restored best model with validation loss: {best_val_loss:.4f}")
+    
+    return train_losses, val_losses
+
+
+# Evaluation function
+def evaluate_model(model, model_name):
+    print(f"\nEvaluating {model_name}...")
     model.eval()
+    
+    all_predictions = []
+    all_targets = []
+    
     with torch.no_grad():
-        val_predictions = model(X_test.to(device))
-        val_loss = loss_function(val_predictions, Y_test.to(device))
-        val_losses.append(val_loss.item())
+        for i in range(0, len(X_test), BATCH_SIZE):
+            batch_X = X_test[i:i+BATCH_SIZE].to(device)
+            batch_Y = Y_test[i:i+BATCH_SIZE]
+            
+            predictions = model(batch_X)
+            all_predictions.append(predictions.cpu().numpy())
+            all_targets.append(batch_Y.numpy())
     
-    # ADDED: Learning rate scheduling
-    scheduler.step()
+    # Combine all predictions and targets
+    predictions_array = np.vstack(all_predictions)
+    targets_array = np.vstack(all_targets)
     
-    # ADDED: Early stopping logic
-    if val_loss.item() < best_val_loss:
-        best_val_loss = val_loss.item()
-        best_model_state = model.state_dict().copy()
-        patience_counter = 0
-    else:
-        patience_counter += 1
+    # Denormalize to get actual pressure values using MinMaxScaler
+    # Create dummy arrays with zeros for flow, actual values for pressure
+    pred_dummy = np.zeros((predictions_array.shape[0] * PRED_LENGTH, 2))
+    pred_dummy[:, 1] = predictions_array.flatten()
+    predictions_denorm = scaler.inverse_transform(pred_dummy)[:, 1]
+    predictions_actual = predictions_denorm.reshape(predictions_array.shape)
     
-    if patience_counter >= patience:
-        print(f'Early stopping at epoch {epoch+1}')
-        break
+    target_dummy = np.zeros((targets_array.shape[0] * PRED_LENGTH, 2))
+    target_dummy[:, 1] = targets_array.flatten()
+    targets_denorm = scaler.inverse_transform(target_dummy)[:, 1]
+    targets_actual = targets_denorm.reshape(targets_array.shape)
     
-    # Print progress every 10 epochs
-    if (epoch + 1) % 10 == 0:
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_train_loss:.4f}, '
-              f'Val Loss: {val_loss.item():.4f}, LR: {current_lr:.6f}')
+    # Calculate error metrics
+    mse = np.mean((predictions_actual - targets_actual)**2)
+    mae = np.mean(np.abs(predictions_actual - targets_actual))
+    rmse = np.sqrt(mse)
+    
+    # Calculate R² score
+    ss_res = np.sum((targets_actual - predictions_actual)**2)
+    ss_tot = np.sum((targets_actual - np.mean(targets_actual))**2)
+    r2 = 1 - (ss_res / ss_tot)
+    
+    return {
+        'mse': mse,
+        'mae': mae,
+        'rmse': rmse,
+        'r2': r2,
+        'predictions': predictions_actual,
+        'targets': targets_actual
+    }
 
 
-# ADDED: Restore best model
-if best_model_state is not None:
-    model.load_state_dict(best_model_state)
-    print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+# Define all models
+models = {
+    'LSTM + Dense (Original)': LSTMDenseModel(),
+    'FNN': FNNModel(),
+    'Dense-RNN-Dense': DenseRNNDenseModel(),
+    'Dense-LSTM-Dense': DenseLSTMDenseModel(),
+    'Simple RNN': SimpleRNNModel()
+}
+
+# Train and evaluate all models
+results = {}
+training_histories = {}
+
+for model_name, model in models.items():
+    # Print model info
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\n{model_name} has {total_params:,} parameters")
+    
+    # Move model to device
+    model = model.to(device)
+    
+    # Train model
+    train_losses, val_losses = train_model(model, model_name)
+    training_histories[model_name] = {'train': train_losses, 'val': val_losses}
+    
+    # Evaluate model
+    metrics = evaluate_model(model, model_name)
+    results[model_name] = metrics
 
 
-# Test the model
-print("\nTesting model...")
-model.eval()  # Set to evaluation mode
+# Print comparison results
+print("\n" + "="*60)
+print("MODEL COMPARISON RESULTS")
+print("="*60)
+print(f"{'Model':<25} {'RMSE':<12} {'R²':<10}")
+print("-"*60)
+
+for model_name, metrics in results.items():
+    print(f"{model_name:<25} {metrics['rmse']:<12.2f} {metrics['r2']:<10.4f}")
+
+# Find best models
+best_model_r2 = max(results.items(), key=lambda x: x[1]['r2'])
+best_model_rmse = min(results.items(), key=lambda x: x[1]['rmse'])
+
+print(f"\nBest model based on R² score: {best_model_r2[0]} (R² = {best_model_r2[1]['r2']:.4f})")
+print(f"Best model based on RMSE: {best_model_rmse[0]} (RMSE = {best_model_rmse[1]['rmse']:.2f})")
 
 
-# Make predictions on test data
-all_predictions = []
-all_targets = []
+# Simplified plotting - only plots 1, 2, 3, 6, 9
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))
 
-
-with torch.no_grad():  # Don't calculate gradients during testing
-    for i in range(0, len(X_test), BATCH_SIZE):
-        batch_X = X_test[i:i+BATCH_SIZE].to(device)
-        batch_Y = Y_test[i:i+BATCH_SIZE]
-        
-        predictions = model(batch_X)
-        all_predictions.append(predictions.cpu().numpy())
-        all_targets.append(batch_Y.numpy())
-
-
-# Combine all predictions and targets
-predictions_array = np.vstack(all_predictions)
-targets_array = np.vstack(all_targets)
-
-
-# Denormalize to get actual pressure values
-pressure_mean = scaler.mean_[1]
-pressure_std = scaler.scale_[1]
-
-# CHANGED: Adjust denormalization for MinMaxScaler
-# For MinMaxScaler, we need to use inverse_transform properly
-# Create dummy arrays with zeros for flow, actual values for pressure
-pred_dummy = np.zeros((predictions_array.shape[0] * PRED_LENGTH, 2))
-pred_dummy[:, 1] = predictions_array.flatten()
-predictions_denorm = scaler.inverse_transform(pred_dummy)[:, 1]
-predictions_actual = predictions_denorm.reshape(predictions_array.shape)
-
-target_dummy = np.zeros((targets_array.shape[0] * PRED_LENGTH, 2))
-target_dummy[:, 1] = targets_array.flatten()
-targets_denorm = scaler.inverse_transform(target_dummy)[:, 1]
-targets_actual = targets_denorm.reshape(targets_array.shape)
-
-
-# Calculate error metrics
-rmse = np.sqrt(np.mean((predictions_actual - targets_actual)**2))
-
-# Calculate R² score
-ss_res = np.sum((targets_actual - predictions_actual)**2)
-ss_tot = np.sum((targets_actual - np.mean(targets_actual))**2)
-r2_score = 1 - (ss_res / ss_tot)
-
-print(f"\nTest Results:")
-print(f"R² Score: {r2_score:.4f}")
-print(f"RMSE: {rmse:.2f} psiA")
-
-
-# Plot results
-fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-
-# Plot 1: Training and Validation Loss
-axes[0, 0].plot(train_losses, label='Training Loss', alpha=0.7)
-axes[0, 0].plot(val_losses, label='Validation Loss', alpha=0.7)
-axes[0, 0].set_title('Training and Validation Loss Over Time')
+# Plot 1: Training loss comparison
+axes[0, 0].set_title('Training Loss Comparison')
+for model_name, history in training_histories.items():
+    axes[0, 0].plot(history['train'], label=model_name, alpha=0.7)
 axes[0, 0].set_xlabel('Epoch')
-axes[0, 0].set_ylabel('Loss')
+axes[0, 0].set_ylabel('Training Loss')
 axes[0, 0].legend()
 axes[0, 0].grid(True, alpha=0.3)
 
-# Plot 2: First prediction step comparison
-axes[0, 1].plot(targets_actual[:50, 0], label='Actual Pressure', alpha=0.7)
-axes[0, 1].plot(predictions_actual[:50, 0], label='Predicted Pressure', alpha=0.7)
-axes[0, 1].set_title('LSTM + Dense: First Step Pressure Predictions')
-axes[0, 1].set_xlabel('Test Sample')
-axes[0, 1].set_ylabel('Pressure (psiA)')
+# Plot 2: Validation loss comparison
+axes[0, 1].set_title('Validation Loss Comparison')
+for model_name, history in training_histories.items():
+    axes[0, 1].plot(history['val'], label=model_name, alpha=0.7)
+axes[0, 1].set_xlabel('Epoch')
+axes[0, 1].set_ylabel('Validation Loss')
 axes[0, 1].legend()
 axes[0, 1].grid(True, alpha=0.3)
 
-# Plot 3: Prediction error over time steps
-avg_error_per_step = np.mean(np.abs(predictions_actual - targets_actual), axis=0)
-axes[1, 0].bar(range(1, PRED_LENGTH + 1), avg_error_per_step)
-axes[1, 0].set_title('Average Prediction Error by Time Step')
-axes[1, 0].set_xlabel('Prediction Step')
-axes[1, 0].set_ylabel('Average Absolute Error (psiA)')
+# Plot 3: R² comparison
+axes[0, 2].set_title('R² Score Comparison')
+model_names = list(results.keys())
+r2_scores = [results[name]['r2'] for name in model_names]
+bars = axes[0, 2].bar(range(len(model_names)), r2_scores, alpha=0.7)
+axes[0, 2].set_ylabel('R² Score')
+axes[0, 2].set_xticks(range(len(model_names)))
+axes[0, 2].set_xticklabels([name.split()[0] for name in model_names], rotation=45)
+axes[0, 2].grid(True, alpha=0.3, axis='y')
+# Add value labels
+for bar, r2 in zip(bars, r2_scores):
+    axes[0, 2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                    f'{r2:.3f}', ha='center', va='bottom', fontsize=9)
+
+# Plot 6: Best model predictions vs actual (first step)
+axes[1, 0].set_title(f'{best_model_r2[0]}: First Step Predictions')
+best_results = results[best_model_r2[0]]
+sample_size = min(50, len(best_results['predictions']))
+axes[1, 0].plot(best_results['targets'][:sample_size, 0], label='Actual', alpha=0.7)
+axes[1, 0].plot(best_results['predictions'][:sample_size, 0], label='Predicted', alpha=0.7)
+axes[1, 0].set_xlabel('Sample')
+axes[1, 0].set_ylabel('Pressure (psiA)')
+axes[1, 0].legend()
 axes[1, 0].grid(True, alpha=0.3)
 
-# Plot 4: Scatter plot of predictions vs actual (first step only)
-axes[1, 1].scatter(targets_actual[:, 0], predictions_actual[:, 0], alpha=0.5)
-axes[1, 1].plot([targets_actual[:, 0].min(), targets_actual[:, 0].max()], 
-                [targets_actual[:, 0].min(), targets_actual[:, 0].max()], 
-                'r--', label='Perfect Prediction')
-axes[1, 1].set_title('Predicted vs Actual Pressure (First Step)')
-axes[1, 1].set_xlabel('Actual Pressure (psiA)')
-axes[1, 1].set_ylabel('Predicted Pressure (psiA)')
-axes[1, 1].legend()
+# Plot 9: Model complexity vs performance
+axes[1, 1].set_title('Model Complexity vs R² Score')
+param_counts = []
+for model_name, model in models.items():
+    param_counts.append(sum(p.numel() for p in model.parameters()))
+axes[1, 1].scatter(param_counts, r2_scores, alpha=0.7, s=100)
+for i, name in enumerate(model_names):
+    axes[1, 1].annotate(name.split()[0], (param_counts[i], r2_scores[i]), 
+                        xytext=(5, 5), textcoords='offset points', fontsize=8)
+axes[1, 1].set_xlabel('Number of Parameters')
+axes[1, 1].set_ylabel('R² Score')
 axes[1, 1].grid(True, alpha=0.3)
+
+# Hide the empty subplot
+axes[1, 2].axis('off')
 
 plt.tight_layout()
 plt.show()
@@ -295,3 +466,5 @@ print("✓ Non-overlapping sequences to prevent data leakage")
 print("✓ MinMaxScaler for better neural network convergence")
 print("✓ Early stopping to keep best model")
 print("✓ Learning rate scheduling for improved training")
+print("✓ Multiple model architectures comparison")
+print("✓ Comprehensive evaluation with RMSE and R² metrics")
