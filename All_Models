@@ -1,0 +1,535 @@
+
+# SECTION 1 : Imports
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.model_selection import KFold
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+from collections import defaultdict
+import copy
+
+
+# SECTION 2 : Basic settings
+SEQ_LENGTH = 50     
+BATCH_SIZE = 64  # Increased batch size
+LEARNING_RATE = 0.001
+EPOCHS = 50
+HIDDEN_SIZE = 64
+NUM_LAYERS = 2
+DROPOUT = 0.2
+K_FOLDS = 2     
+TEST_SIZE = 0.2     
+
+
+# SECTION 3 : Check device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+
+# SECTION 4 : Load data
+# df = pd.read_excel('THEE_data_2.xlsx')
+df = pd.read_csv('flow_pressure_data.csv')
+flow_rate = df['Flow Rate (GPM)'].values
+pressure = df['Pressure (PSI)'].values
+
+print(f"Data info:")
+print(f"Flow rate range: {flow_rate.min():.2f} to {flow_rate.max():.2f}")
+print(f"Pressure range: {pressure.min():.2f} to {pressure.max():.2f}")
+print(f"Data points: {len(flow_rate)}")
+
+
+# SECTION 5 : Improved data normalization
+# Try MinMaxScaler instead of StandardScaler for better convergence
+scaler_X = MinMaxScaler(feature_range=(-1, 1))
+scaler_y = MinMaxScaler(feature_range=(-1, 1))
+
+flow_normalized = scaler_X.fit_transform(flow_rate.reshape(-1, 1)).flatten()
+pressure_normalized = scaler_y.fit_transform(pressure.reshape(-1, 1)).flatten()
+
+# Check normalization
+print(f"Normalized flow range: {flow_normalized.min():.3f} to {flow_normalized.max():.3f}")
+print(f"Normalized pressure range: {pressure_normalized.min():.3f} to {pressure_normalized.max():.3f}")
+
+# Combine data
+data = np.column_stack((flow_normalized, pressure_normalized))
+
+
+# SECTION 6 : Improved sequence creation with validation
+def create_sequences(data, seq_length=50, stride=1):
+    X, y = [], []
+    for i in range(0, len(data) - seq_length, stride):
+        X.append(data[i:i+seq_length, 0])  # Flow sequences
+        y.append(data[i+seq_length, 1])     # Next pressure value
+    return np.array(X), np.array(y)
+
+def create_sequences_no_overlap(data, seq_length=50):
+    """Create non-overlapping sequences to prevent data leakage"""
+    X, y = [], []
+    for i in range(0, len(data) - seq_length, seq_length):
+        if i + seq_length < len(data):
+            X.append(data[i:i+seq_length, 0])
+            y.append(data[i+seq_length, 1])
+    return np.array(X), np.array(y)
+
+# Use non-overlapping sequences for better validation
+X, y = create_sequences_no_overlap(data, SEQ_LENGTH)
+print(f"Created {len(X)} non-overlapping sequences")
+
+
+# SECTION 7 : Improved Model Definitions
+
+# 1. Improved FNN
+class FNNModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, dropout=0.2):
+        super(FNNModel, self).__init__()
+        
+        self.layers = nn.Sequential(
+            nn.Linear(input_size, hidden_size * 2),
+            nn.BatchNorm1d(hidden_size * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size * 2, hidden_size),
+            nn.BatchNorm1d(hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.BatchNorm1d(hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout / 2),
+            nn.Linear(hidden_size // 2, 1)
+        )
+        
+    def forward(self, x):
+        return self.layers(x)
+
+
+# 2. Fixed Dense-RNN-Dense Model
+class DenseRNNDenseModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, num_layers=2, dropout=0.2):
+        super(DenseRNNDenseModel, self).__init__()
+        
+        # Process sequence properly
+        self.rnn = nn.RNN(1, hidden_size, num_layers, 
+                         batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Final dense layers
+        self.dense1 = nn.Linear(hidden_size, hidden_size // 2)
+        self.bn1 = nn.BatchNorm1d(hidden_size // 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(hidden_size // 2, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        # Reshape for RNN: (batch_size, seq_length, 1)
+        x = x.unsqueeze(-1)
+        
+        # RNN processing
+        rnn_out, _ = self.rnn(x)
+        
+        # Take the last output
+        x = rnn_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+# 3. Fixed Dense-LSTM-Dense Model  
+class DenseLSTMDenseModel(nn.Module):
+    def __init__(self, input_size=SEQ_LENGTH, hidden_size=64, num_layers=2, dropout=0.2):
+        super(DenseLSTMDenseModel, self).__init__()
+        
+        # Process sequence properly
+        self.lstm = nn.LSTM(1, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Final dense layers
+        self.dense1 = nn.Linear(hidden_size, hidden_size // 2)
+        self.bn1 = nn.BatchNorm1d(hidden_size // 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(hidden_size // 2, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        # Reshape for LSTM: (batch_size, seq_length, 1)
+        x = x.unsqueeze(-1)
+        
+        # LSTM processing
+        lstm_out, _ = self.lstm(x)
+        
+        # Take the last output
+        x = lstm_out[:, -1, :]
+        
+        # Final dense layers
+        x = self.dense1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+# 4. Improved LSTM Model
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
+        super(LSTMModel, self).__init__()
+        
+        # LSTM layer
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                           batch_first=True, dropout=dropout if num_layers > 1 else 0)
+        
+        # Dense layers with batch normalization
+        self.dense1 = nn.Linear(hidden_size, 32)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(32, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length) or (batch_size, seq_length, 1)
+        if len(x.shape) == 2:
+            x = x.unsqueeze(-1)  # Add feature dimension
+            
+        lstm_out, _ = self.lstm(x)
+        last_output = lstm_out[:, -1, :]
+        
+        x = self.dense1(last_output)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        
+        return x
+
+
+# SECTION 8 : Improved training function with accuracy tracking
+def calculate_r2_score(y_true, y_pred):
+    """Calculate R² score"""
+    ss_res = torch.sum((y_true - y_pred) ** 2)
+    ss_tot = torch.sum((y_true - torch.mean(y_true)) ** 2)
+    r2 = 1 - (ss_res / ss_tot)
+    return r2.item()
+
+def calculate_accuracy_within_tolerance(y_true, y_pred, tolerance=0.05):
+    """Calculate percentage of predictions within tolerance of actual values"""
+    relative_error = torch.abs((y_pred - y_true) / (torch.abs(y_true) + 1e-8))
+    within_tolerance = (relative_error <= tolerance).float()
+    accuracy = torch.mean(within_tolerance) * 100
+    return accuracy.item()
+
+def train_model(model, X_train, y_train, X_val, y_val, epochs, batch_size, patience=15):
+    criterion = nn.MSELoss()
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    
+    train_losses = []
+    val_losses = []
+    train_r2_scores = []
+    val_r2_scores = []
+    train_accuracies = []
+    val_accuracies = []
+    
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+    
+    # Add warmup
+    warmup_epochs = 10
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, total_iters=warmup_epochs
+    )
+    
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        epoch_loss = 0
+        epoch_r2 = 0
+        epoch_acc = 0
+        num_batches = 0
+        
+        # Shuffle training data
+        indices = torch.randperm(len(X_train))
+        X_train_shuffled = X_train[indices]
+        y_train_shuffled = y_train[indices]
+        
+        # Process in batches
+        for i in range(0, len(X_train_shuffled), batch_size):
+            batch_X = X_train_shuffled[i:i+batch_size]
+            batch_y = y_train_shuffled[i:i+batch_size]
+            
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs.squeeze(), batch_y)
+            loss.backward()
+            
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            
+            optimizer.step()
+            
+            # Calculate metrics for this batch
+            with torch.no_grad():
+                batch_r2 = calculate_r2_score(batch_y, outputs.squeeze())
+                batch_acc = calculate_accuracy_within_tolerance(batch_y, outputs.squeeze())
+            
+            epoch_loss += loss.item()
+            epoch_r2 += batch_r2
+            epoch_acc += batch_acc
+            num_batches += 1
+        
+        avg_train_loss = epoch_loss / num_batches
+        avg_train_r2 = epoch_r2 / num_batches
+        avg_train_acc = epoch_acc / num_batches
+        
+        train_losses.append(avg_train_loss)
+        train_r2_scores.append(avg_train_r2)
+        train_accuracies.append(avg_train_acc)
+        
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val)
+            val_loss = criterion(val_outputs.squeeze(), y_val)
+            val_r2 = calculate_r2_score(y_val, val_outputs.squeeze())
+            val_acc = calculate_accuracy_within_tolerance(y_val, val_outputs.squeeze())
+            
+            val_losses.append(val_loss.item())
+            val_r2_scores.append(val_r2)
+            val_accuracies.append(val_acc)
+        
+        # Learning rate scheduling
+        if epoch < warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            scheduler.step()
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+            
+        if (epoch + 1) % 20 == 0:
+            lr = optimizer.param_groups[0]['lr']
+            print(f"  Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, "
+                  f"Val Loss: {val_loss:.6f}, Train R²: {avg_train_r2:.4f}, "
+                  f"Val R²: {val_r2:.4f}, Train Acc: {avg_train_acc:.1f}%, "
+                  f"Val Acc: {val_acc:.1f}%, LR: {lr:.2e}")
+    
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    return {
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'train_r2_scores': train_r2_scores,
+        'val_r2_scores': val_r2_scores,
+        'train_accuracies': train_accuracies,
+        'val_accuracies': val_accuracies
+    }, model
+
+
+# SECTION 9 : Improved K-Fold Cross Validation
+def kfold_cross_validation(model_class, model_kwargs, X_data, y_data, k_folds=5):
+    """
+    Perform k-fold cross validation with proper shuffling
+    """
+    # Shuffle data before splitting
+    indices = np.random.permutation(len(X_data))
+    X_shuffled = X_data[indices]
+    y_shuffled = y_data[indices]
+    
+    kfold = KFold(n_splits=k_folds, shuffle=True, random_state=42)
+    
+    fold_results = {
+        'train_losses': [],
+        'val_losses': [],
+        'final_train_loss': [],
+        'final_val_loss': []
+    }
+    
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(X_shuffled)):
+        print(f"    Fold {fold+1}/{k_folds}")
+        
+        # Get fold data
+        X_train_fold = torch.FloatTensor(X_shuffled[train_idx]).to(device)
+        y_train_fold = torch.FloatTensor(y_shuffled[train_idx]).to(device)
+        X_val_fold = torch.FloatTensor(X_shuffled[val_idx]).to(device)
+        y_val_fold = torch.FloatTensor(y_shuffled[val_idx]).to(device)
+        
+        print(f"      Train size: {len(X_train_fold)}, Val size: {len(X_val_fold)}")
+        print(f"      Train target range: {y_train_fold.min():.3f} to {y_train_fold.max():.3f}")
+        print(f"      Val target range: {y_val_fold.min():.3f} to {y_val_fold.max():.3f}")
+        
+        # Create new model instance
+        model = model_class(**model_kwargs).to(device)
+        
+        # Train model
+        training_history, trained_model = train_model(
+            model, X_train_fold, y_train_fold, X_val_fold, y_val_fold,
+            epochs=EPOCHS, batch_size=BATCH_SIZE
+        )
+        
+        fold_results['train_losses'].append(training_history['train_losses'])
+        fold_results['val_losses'].append(training_history['val_losses'])
+        fold_results['final_train_loss'].append(training_history['train_losses'][-1])
+        fold_results['final_val_loss'].append(training_history['val_losses'][-1])
+    
+    # Calculate statistics
+    fold_results['avg_train_loss'] = np.mean(fold_results['final_train_loss'])
+    fold_results['std_train_loss'] = np.std(fold_results['final_train_loss'])
+    fold_results['avg_val_loss'] = np.mean(fold_results['final_val_loss'])
+    fold_results['std_val_loss'] = np.std(fold_results['final_val_loss'])
+    
+    return fold_results
+
+
+# SECTION 10 : Main training and evaluation
+def main():
+    # Improved data splitting with shuffling
+    indices = np.random.permutation(len(X))
+    test_split_idx = int(len(X) * (1 - TEST_SIZE))
+    
+    train_cv_indices = indices[:test_split_idx]
+    test_indices = indices[test_split_idx:]
+    
+    X_train_cv = X[train_cv_indices]
+    y_train_cv = y[train_cv_indices]
+    X_test = X[test_indices]
+    y_test = y[test_indices]
+    
+    print(f"Data split: {len(X_train_cv)} samples for k-fold CV, {len(X_test)} samples for testing")
+    print(f"K-fold cross validation with {K_FOLDS} folds\n")
+    
+    # Define models to train
+    models = {
+        'FNN': (FNNModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 'dropout': DROPOUT}),
+        'Dense-RNN-Dense': (DenseRNNDenseModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 
+                                                  'num_layers': NUM_LAYERS, 'dropout': DROPOUT}),
+        'Dense-LSTM-Dense': (DenseLSTMDenseModel, {'input_size': SEQ_LENGTH, 'hidden_size': HIDDEN_SIZE, 
+                                                    'num_layers': NUM_LAYERS, 'dropout': DROPOUT}),
+        'LSTM (Original)': (LSTMModel, {'input_size': 1, 'hidden_size': HIDDEN_SIZE, 
+                                        'num_layers': NUM_LAYERS, 'dropout': DROPOUT})
+    }
+    
+    results = {}
+    final_models = {}
+    
+    # Train each model with k-fold cross validation
+    for model_name, (model_class, model_kwargs) in models.items():
+        print(f"\nTraining {model_name} with {K_FOLDS}-fold cross validation...")
+        
+        # Perform k-fold cross validation
+        cv_results = kfold_cross_validation(
+            model_class, model_kwargs, X_train_cv, y_train_cv, K_FOLDS
+        )
+        
+        results[model_name] = cv_results
+        
+        # Train final model on all training data with proper validation split
+        print(f"  Training final {model_name} on all training data...")
+        
+        # Shuffle before final train/val split
+        train_indices = np.random.permutation(len(X_train_cv))
+        val_split = int(len(X_train_cv) * 0.8)
+        
+        final_train_idx = train_indices[:val_split]
+        final_val_idx = train_indices[val_split:]
+        
+        X_train_tensor = torch.FloatTensor(X_train_cv[final_train_idx]).to(device)
+        y_train_tensor = torch.FloatTensor(y_train_cv[final_train_idx]).to(device)
+        X_val_tensor = torch.FloatTensor(X_train_cv[final_val_idx]).to(device)
+        y_val_tensor = torch.FloatTensor(y_train_cv[final_val_idx]).to(device)
+        
+        final_model = model_class(**model_kwargs).to(device)
+        training_history, trained_model = train_model(
+            final_model, X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor,
+            epochs=EPOCHS, batch_size=BATCH_SIZE
+        )
+        
+        final_models[model_name] = trained_model
+        results[model_name]['final_training_history'] = training_history
+        
+        # Evaluate on test set
+        trained_model.eval()
+        X_test_tensor = torch.FloatTensor(X_test).to(device)
+        y_test_tensor = torch.FloatTensor(y_test).to(device)
+        
+        with torch.no_grad():
+            predictions = trained_model(X_test_tensor).squeeze().cpu().numpy()
+            actuals = y_test_tensor.cpu().numpy()
+        
+        # Denormalize
+        predictions_orig = scaler_y.inverse_transform(predictions.reshape(-1, 1)).flatten()
+        actuals_orig = scaler_y.inverse_transform(actuals.reshape(-1, 1)).flatten()
+        
+        # Calculate metrics
+        mse = np.mean((predictions_orig - actuals_orig) ** 2)
+        mae = np.mean(np.abs(predictions_orig - actuals_orig))
+        ss_res = np.sum((actuals_orig - predictions_orig) ** 2)
+        ss_tot = np.sum((actuals_orig - np.mean(actuals_orig)) ** 2)
+        r2 = 1 - (ss_res / ss_tot)
+        
+        results[model_name]['test_mse'] = mse
+        results[model_name]['test_mae'] = mae
+        results[model_name]['test_r2'] = r2
+        results[model_name]['fidelity'] = r2 * 100
+        results[model_name]['predictions'] = predictions_orig
+        results[model_name]['actuals'] = actuals_orig
+    
+    return results, final_models
+
+
+# Run the training
+if __name__ == "__main__":
+    # Set random seeds for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(42)
+    
+    results, final_models = main()
+    
+    # SECTION 12 : Print comparison results
+    print("\n" + "="*90)
+    print("MODEL COMPARISON RESULTS (K-FOLD CROSS VALIDATION)")
+    print("="*90)
+    print(f"{'Model':<20} {'CV Loss (mean±std)':<25} {'Test MSE':<12} {'Test MAE':<12} {'Test R²':<10} {'Fidelity':<10}")
+    print("-"*90)
+
+    for model_name, res in results.items():
+        cv_loss = f"{res['avg_val_loss']:.6f} ± {res['std_val_loss']:.6f}"
+        print(f"{model_name:<20} {cv_loss:<25} {res['test_mse']:<12.4f} {res['test_mae']:<12.4f} "
+              f"{res['test_r2']:<10.4f} {res['fidelity']:<10.2f}%")
+
+    # Find best model
+    best_model = min(results.items(), key=lambda x: x[1]['avg_val_loss'])
+    print(f"\nBest model based on CV validation loss: {best_model[0]}")
+
+    # Overfitting analysis
+    print("\nOVERFITTING ANALYSIS:")
+    print("-"*50)
+    for model_name, res in results.items():
+        overfitting_ratio = res['avg_val_loss'] / res['avg_train_loss']
+        status = "✓ Good" if overfitting_ratio < 1.2 else "⚠ Potential Overfitting"
+        print(f"{model_name:<20} Train/Val Ratio: {overfitting_ratio:.3f} ({status})")
