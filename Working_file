@@ -8,9 +8,8 @@ positive_r2_values = [max(0, r2) for r2 in r2_values]
 axes[0, 0].bar(model_names, positive_r2_values, alpha=0.7)
 axes[0, 0].set_ylabel('R² Score')
 axes[0, 0].set_title('Model Performance Comparison')
-axes[0, 0].set_ylim(0, None)  # Y-axis starts at 0
+axes[0, 0].set_ylim(0, 100)  # Y-axis from 0-100
 
 # Add value labels on bars
 for i, (name, value) in enumerate(zip(model_names, r2_values)):
-    if value > 0:
-        axes[0, 0].text(i, value + 0.01, f'{value:.3f}', ha='center', va='bottom', fontsize=9)
+    axes[0, 0].text(i, max(0, value) + 1, f'{value:.3f}', ha='center', va='bottom', fontsize=9)
