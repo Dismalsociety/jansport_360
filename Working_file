@@ -386,20 +386,30 @@ print(f"\n🔧 All models include: early stopping, dropout, proper data splits, 
 # Create plots
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
-# Plot 1: R² comparison
+# Plot 1: R² comparison (positive values only)
 model_names = list(results.keys())
 r2_values = [results[name]['r2'] for name in model_names]
 
-axes[0, 0].bar(model_names, r2_values, alpha=0.7)
+# Only plot positive R² values
+positive_r2_values = [max(0, r2) for r2 in r2_values]  # Convert negative to 0
+bar_colors = ['green' if r2 > 0 else 'red' for r2 in r2_values]  # Color coding
+
+bars = axes[0, 0].bar(model_names, positive_r2_values, alpha=0.7, color=bar_colors)
 axes[0, 0].set_ylabel('R² Score')
-axes[0, 0].set_title('Model Performance Comparison')
+axes[0, 0].set_title('Model Performance Comparison (Positive R² Only)')
 axes[0, 0].tick_params(axis='x', rotation=45)
 axes[0, 0].grid(True, alpha=0.3)
-axes[0, 0].set_ylim(bottom=0)  # Force y-axis to start at 0
+axes[0, 0].set_ylim(0, max(positive_r2_values) * 1.1)  # Y-axis starts at 0
 
-# Add value labels on bars
-for i, (name, value) in enumerate(zip(model_names, r2_values)):
-    axes[0, 0].text(i, value + 0.01, f'{value:.3f}', ha='center', va='bottom', fontsize=9)
+# Add value labels on bars (show original R² values, including negatives)
+for i, (name, original_value, bar_height) in enumerate(zip(model_names, r2_values, positive_r2_values)):
+    if original_value > 0:
+        axes[0, 0].text(i, bar_height + max(positive_r2_values) * 0.01, f'{original_value:.3f}', 
+                        ha='center', va='bottom', fontsize=9)
+    else:
+        # For negative values, show the value below the x-axis
+        axes[0, 0].text(i, -max(positive_r2_values) * 0.05, f'{original_value:.3f}', 
+                        ha='center', va='top', fontsize=9, color='red')
 
 # Plot 2: Best model predictions vs actual (time series style)
 best_result = results[best_model_name]
