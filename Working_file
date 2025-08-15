@@ -8,8 +8,10 @@ from sklearn.metrics import r2_score
 import copy
 
 # Basic settings
-HIDDEN_SIZES = [128, 96, 64, 32]  # Deep network layer sizes
-BATCH_SIZE = 32                   # Smaller batch size for better training
+SEQ_LENGTH = 20
+HIDDEN_SIZE = 64
+DENSE_SIZE = 64
+BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
 EPOCHS = 1000
 DROPOUT = 0.2
@@ -38,216 +40,346 @@ pressures_normalized = scaler_pressure.fit_transform(pressures.reshape(-1, 1)).f
 print(f"Normalized flow range: {flows_normalized.min():.3f} to {flows_normalized.max():.3f}")
 print(f"Normalized pressure range: {pressures_normalized.min():.3f} to {pressures_normalized.max():.3f}")
 
-# Simple direct mapping: flow -> pressure (no sequences)
-print("Preparing data...")
-X_data = flows_normalized.reshape(-1, 1)  # Each flow value as input
-Y_data = pressures_normalized             # Corresponding pressure as target
+# Combine data
+data_normalized = np.column_stack([flows_normalized, pressures_normalized])
 
-print(f"Input shape: {X_data.shape}")
-print(f"Target shape: {Y_data.shape}")
+# Create non-overlapping sequences for sequence-based models
+print("Creating sequences...")
+def create_sequences_no_overlap(data, seq_length):
+    X_data = []
+    Y_data = []
+    
+    step_size = seq_length
+    for i in range(0, len(data) - seq_length, step_size):
+        if i + seq_length < len(data):
+            # For flow-only sequence models
+            input_seq = data[i:i+seq_length, 0]  # Flow sequence
+            X_data.append(input_seq)
+            
+            # Target: next pressure value
+            target_pressure = data[i+seq_length, 1]
+            Y_data.append(target_pressure)
+    
+    return np.array(X_data), np.array(Y_data)
 
-# Proper data splitting with shuffling
+# For LSTM-style models (sequences)
+X_seq, Y_seq = create_sequences_no_overlap(data_normalized, SEQ_LENGTH)
+print(f"Created {len(X_seq)} sequences")
+
+# For direct mapping models (flow -> pressure)
+X_direct = flows_normalized.reshape(-1, 1)
+Y_direct = pressures_normalized
+
+# Data splitting with shuffling
 print("Splitting data...")
-indices = np.random.permutation(len(X_data))
-X_data_shuffled = X_data[indices]
-Y_data_shuffled = Y_data[indices]
+def split_data(X, Y, test_size=0.2):
+    indices = np.random.permutation(len(X))
+    X_shuffled = X[indices]
+    Y_shuffled = Y[indices]
+    
+    split = int((1 - test_size) * len(X_shuffled))
+    X_train = torch.FloatTensor(X_shuffled[:split])
+    Y_train = torch.FloatTensor(Y_shuffled[:split])
+    X_test = torch.FloatTensor(X_shuffled[split:])
+    Y_test = torch.FloatTensor(Y_shuffled[split:])
+    
+    return X_train, Y_train, X_test, Y_test
 
-# Split into train and test 
-split = int(.8 * len(X_data_shuffled))
-X_train = torch.FloatTensor(X_data_shuffled[:split])
-Y_train = torch.FloatTensor(Y_data_shuffled[:split])
-X_test = torch.FloatTensor(X_data_shuffled[split:])
-Y_test = torch.FloatTensor(Y_data_shuffled[split:])
+# Split sequence data
+X_seq_train, Y_seq_train, X_seq_test, Y_seq_test = split_data(X_seq, Y_seq)
 
-print(f"Training samples: {len(X_train)}")
-print(f"Test samples: {len(X_test)}")
+# Split direct mapping data  
+X_direct_train, Y_direct_train, X_direct_test, Y_direct_test = split_data(X_direct, Y_direct)
 
-# Define Deep Neural Network Model
-class DeepNN(nn.Module):
-    def __init__(self, hidden_sizes=HIDDEN_SIZES, dropout=DROPOUT):
-        super(DeepNN, self).__init__()
-        
-        layers = []
-        input_size = 1  # Single flow input
-        
-        # Create deep network layers
-        for hidden_size in hidden_sizes:
-            layers.extend([
-                nn.Linear(input_size, hidden_size),
-                nn.BatchNorm1d(hidden_size),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ])
-            input_size = hidden_size
-        
-        # Output layer
-        layers.append(nn.Linear(input_size, 1))
-        
-        self.network = nn.Sequential(*layers)
+print(f"Sequence training samples: {len(X_seq_train)}")
+print(f"Direct mapping training samples: {len(X_direct_train)}")
+
+# Model Definitions
+class FNNModel(nn.Module):
+    def __init__(self):
+        super(FNNModel, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(1, HIDDEN_SIZE * 2),
+            nn.ReLU(),
+            nn.Dropout(DROPOUT),
+            nn.Linear(HIDDEN_SIZE * 2, HIDDEN_SIZE),
+            nn.ReLU(),
+            nn.Dropout(DROPOUT),
+            nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2),
+            nn.ReLU(),
+            nn.Dropout(DROPOUT / 2),
+            nn.Linear(HIDDEN_SIZE // 2, 1)
+        )
     
     def forward(self, x):
-        return self.network(x)
+        return self.network(x).squeeze()
 
-model = DeepNN().to(device)
-
-# Count and display model parameters
-total_params = sum(p.numel() for p in model.parameters())
-print(f"Model parameters: {total_params:,}")
-
-# Loss function and optimizer
-MSE = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
-
-# Training with early stopping
-print("\nStarting Training...")
-train_losses = []
-val_losses = []
-
-# Create validation set from last 20% of training data
-val_split = int(0.8 * len(X_train))
-X_train_sub = X_train[:val_split]
-Y_train_sub = Y_train[:val_split]
-X_val = X_train[val_split:]
-Y_val = Y_train[val_split:]
-
-print(f"Training subset: {len(X_train_sub)} samples")
-print(f"Validation subset: {len(X_val)} samples")
-
-# Early stopping parameters
-best_val_loss = float('inf')
-patience = 100  # Increased patience for better training
-patience_counter = 0
-best_model_state = None
-
-for epoch in range(EPOCHS):
-    total_loss = 0
-    num_batches = 0
-
-    # Set model to training mode
-    model.train()
+class DenseRNNDenseModel(nn.Module):
+    def __init__(self):
+        super(DenseRNNDenseModel, self).__init__()
+        self.rnn = nn.RNN(1, HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(DROPOUT)
+        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
     
-    # Train on batches using ONLY the training subset
-    for i in range(0, len(X_train_sub), BATCH_SIZE):
-        # Get batch from training subset only
-        batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
-        batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
+    def forward(self, x):
+        x = x.unsqueeze(-1)  # Add feature dimension
+        rnn_out, _ = self.rnn(x)
+        x = rnn_out[:, -1, :]  # Last output
+        x = self.dense1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        return x.squeeze()
 
-        # Forward pass
-        predictions = model(batch_X).squeeze()
-        loss = MSE(predictions, batch_Y)
+class DenseLSTMDenseModel(nn.Module):
+    def __init__(self):
+        super(DenseLSTMDenseModel, self).__init__()
+        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(DROPOUT)
+        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
+    
+    def forward(self, x):
+        x = x.unsqueeze(-1)  # Add feature dimension
+        lstm_out, _ = self.lstm(x)
+        x = lstm_out[:, -1, :]  # Last output
+        x = self.dense1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        return x.squeeze()
 
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
+class LSTMModel(nn.Module):
+    def __init__(self):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE // 2)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(DROPOUT)
+        self.dense2 = nn.Linear(DENSE_SIZE // 2, 1)
+    
+    def forward(self, x):
+        x = x.unsqueeze(-1)  # Add feature dimension
+        lstm_out, _ = self.lstm(x)
+        x = lstm_out[:, -1, :]  # Last output
+        x = self.dense1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.dense2(x)
+        return x.squeeze()
+
+# Training function
+def train_model(model, X_train, Y_train, X_test, Y_test, model_name):
+    print(f"\n=== Training {model_name} ===")
+    
+    # Loss function and optimizer
+    MSE = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    # Training and validation lists
+    train_losses = []
+    val_losses = []
+    
+    # Create validation set from last 20% of training data
+    val_split = int(0.8 * len(X_train))
+    X_train_sub = X_train[:val_split]
+    Y_train_sub = Y_train[:val_split]
+    X_val = X_train[val_split:]
+    Y_val = Y_train[val_split:]
+    
+    print(f"Training subset: {len(X_train_sub)} samples")
+    print(f"Validation subset: {len(X_val)} samples")
+    
+    # Early stopping parameters
+    best_val_loss = float('inf')
+    patience = 100
+    patience_counter = 0
+    best_model_state = None
+    
+    for epoch in range(EPOCHS):
+        total_loss = 0
+        num_batches = 0
         
-        # Gradient clipping for stable training
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # Set model to training mode
+        model.train()
         
-        optimizer.step()
-
-        total_loss += loss.item()
-        num_batches += 1
-
-    # Average loss
-    avg_loss = total_loss / num_batches
-    train_losses.append(avg_loss)
-
-    # Validation loss
+        # Train on batches
+        for i in range(0, len(X_train_sub), BATCH_SIZE):
+            batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
+            batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
+            
+            # Forward pass
+            predictions = model(batch_X)
+            loss = MSE(predictions, batch_Y)
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            num_batches += 1
+        
+        # Average loss
+        avg_loss = total_loss / num_batches
+        train_losses.append(avg_loss)
+        
+        # Validation loss
+        model.eval()
+        with torch.no_grad():
+            val_outputs = model(X_val.to(device))
+            val_loss = MSE(val_outputs, Y_val.to(device))
+            val_losses.append(val_loss.item())
+        
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            best_model_state = copy.deepcopy(model.state_dict())
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+        
+        if (epoch + 1) % 50 == 0:
+            print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Patience: {patience_counter}/{patience}')
+    
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+    
+    # Testing
+    print("Testing model...")
     model.eval()
     with torch.no_grad():
-        val_outputs = model(X_val.to(device)).squeeze()
-        val_loss = MSE(val_outputs, Y_val.to(device))
-        val_losses.append(val_loss.item())
+        test_predictions = model(X_test.to(device)).cpu().numpy()
+        test_targets = Y_test.cpu().numpy()
     
-    # Early stopping check
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        patience_counter = 0
-        best_model_state = copy.deepcopy(model.state_dict())
-    else:
-        patience_counter += 1
+    # Convert back to original scale
+    predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
+    targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
     
-    if patience_counter >= patience:
-        print(f"Early stopping at epoch {epoch+1}")
-        break
+    # Calculate metrics
+    r2 = r2_score(targets_actual, predictions_actual)
+    mse = np.mean((targets_actual - predictions_actual) ** 2)
+    mae = np.mean(np.abs(targets_actual - predictions_actual))
+    
+    print(f"R²: {r2:.4f}")
+    print(f"MSE: {mse:.2f}")
+    print(f"MAE: {mae:.2f}")
+    
+    return {
+        'model': model,
+        'r2': r2,
+        'mse': mse,
+        'mae': mae,
+        'predictions': predictions_actual,
+        'targets': targets_actual,
+        'train_losses': train_losses,
+        'val_losses': val_losses
+    }
 
-    if (epoch + 1) % 20 == 0:
-        print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Patience: {patience_counter}/{patience}')
+# Train all models
+results = {}
 
-# Restore best model
-if best_model_state is not None:
-    model.load_state_dict(best_model_state)
-    print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+# Train FNN (uses direct mapping)
+fnn_model = FNNModel().to(device)
+results['FNN'] = train_model(fnn_model, X_direct_train, Y_direct_train, X_direct_test, Y_direct_test, 'FNN')
 
-# Testing
-print("\nTesting model...")
-model.eval()
+# Train Dense-RNN-Dense (uses sequences)
+rnn_model = DenseRNNDenseModel().to(device)
+results['Dense-RNN-Dense'] = train_model(rnn_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'Dense-RNN-Dense')
 
-# Predictions on test set
-with torch.no_grad():
-    test_predictions = model(X_test.to(device)).squeeze().cpu().numpy()
-    test_targets = Y_test.cpu().numpy()
+# Train Dense-LSTM-Dense (uses sequences)
+lstm_dense_model = DenseLSTMDenseModel().to(device)
+results['Dense-LSTM-Dense'] = train_model(lstm_dense_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'Dense-LSTM-Dense')
 
-# Convert values back to original scale using correct scalers
-predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
-targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
+# Train LSTM (uses sequences)
+lstm_model = LSTMModel().to(device)
+results['LSTM'] = train_model(lstm_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'LSTM')
 
-# Calculate performance metrics
-r2 = r2_score(targets_actual, predictions_actual)
-mse = np.mean((targets_actual - predictions_actual) ** 2)
-mae = np.mean(np.abs(targets_actual - predictions_actual))
+# Print comparison results
+print("\n" + "="*70)
+print("MODEL COMPARISON RESULTS")
+print("="*70)
+print(f"{'Model':<20} {'R²':<10} {'MSE':<10} {'MAE':<10}")
+print("-"*70)
 
-print(f"R²: {r2:.4f}")
-print(f"MSE: {mse:.2f}")
-print(f"MAE: {mae:.2f}")
+for model_name, result in results.items():
+    print(f"{model_name:<20} {result['r2']:<10.4f} {result['mse']:<10.2f} {result['mae']:<10.2f}")
 
-# Additional debug information
-print(f"\nPredictions range: {predictions_actual.min():.2f} to {predictions_actual.max():.2f}")
-print(f"Targets range: {targets_actual.min():.2f} to {targets_actual.max():.2f}")
+# Find best model
+best_model_name = max(results.keys(), key=lambda x: results[x]['r2'])
+best_result = results[best_model_name]
+print(f"\nBest model: {best_model_name} with R² = {best_result['r2']:.4f}")
 
-# Create plots
-plt.figure(figsize=(15, 5))
+# Create plots for all models
+fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-# Plot 1: Training and validation loss
-plt.subplot(1, 3, 1)
-plt.plot(train_losses, label='Train Loss')
-plt.plot(val_losses, label='Val Loss')
-plt.title('Training and Validation Loss')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.grid(True)
+# Plot 1: R² comparison
+model_names = list(results.keys())
+r2_values = [results[name]['r2'] for name in model_names]
+colors = ['blue', 'green', 'red', 'orange']
 
-# Plot 2: Predictions vs Actual
-plt.subplot(1, 3, 2)
-plt.plot(targets_actual, label='Actual', alpha=0.7, marker='o', markersize=4)
-plt.plot(predictions_actual, label='Predicted', alpha=0.7, marker='s', markersize=4)
-plt.title('Predictions vs Actual')
-plt.xlabel('Test Sample')
-plt.ylabel('Pressure')
-plt.legend()
-plt.grid(True)
+bars = axes[0, 0].bar(model_names, r2_values, color=colors, alpha=0.7)
+axes[0, 0].set_ylabel('R² Score')
+axes[0, 0].set_title('Model Performance Comparison')
+axes[0, 0].grid(True, alpha=0.3)
 
-# Plot 3: Correlation scatter plot
-plt.subplot(1, 3, 3)
-plt.scatter(targets_actual, predictions_actual, alpha=0.6, s=50)
-plt.plot([targets_actual.min(), targets_actual.max()], 
-         [targets_actual.min(), targets_actual.max()], 'r--', lw=2)
-plt.xlabel('Actual Pressure')
-plt.ylabel('Predicted Pressure')
-plt.title(f'Correlation (R² = {r2:.4f})')
-plt.grid(True)
+# Add value labels on bars
+for bar, value in zip(bars, r2_values):
+    axes[0, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
+                   f'{value:.3f}', ha='center', va='bottom')
 
-# Add perfect prediction line and R² text
-plt.text(0.05, 0.95, f'R² = {r2:.4f}\nMSE = {mse:.1f}\nMAE = {mae:.1f}', 
-         transform=plt.gca().transAxes, verticalalignment='top',
-         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+# Plot 2: Best model predictions vs actual
+best_pred = best_result['predictions']
+best_targets = best_result['targets']
+
+axes[0, 1].scatter(best_targets, best_pred, alpha=0.6, s=50)
+axes[0, 1].plot([best_targets.min(), best_targets.max()], 
+               [best_targets.min(), best_targets.max()], 'r--', lw=2)
+axes[0, 1].set_xlabel('Actual Pressure')
+axes[0, 1].set_ylabel('Predicted Pressure')
+axes[0, 1].set_title(f'Best Model: {best_model_name} (R²={best_result["r2"]:.4f})')
+axes[0, 1].grid(True)
+
+# Plot 3: Training curves for best model
+best_train_losses = best_result['train_losses']
+best_val_losses = best_result['val_losses']
+
+axes[1, 0].plot(best_train_losses, label='Train Loss', alpha=0.7)
+axes[1, 0].plot(best_val_losses, label='Val Loss', alpha=0.7)
+axes[1, 0].set_xlabel('Epoch')
+axes[1, 0].set_ylabel('Loss')
+axes[1, 0].set_title(f'{best_model_name} Training Curves')
+axes[1, 0].legend()
+axes[1, 0].grid(True)
+
+# Plot 4: All model predictions comparison (sample)
+axes[1, 1].plot(best_targets[:20], 'ko-', label='Actual', markersize=6)
+colors_pred = ['blue', 'green', 'red', 'orange']
+for i, (name, result) in enumerate(results.items()):
+    pred_sample = result['predictions'][:20]
+    axes[1, 1].plot(pred_sample, 'o-', color=colors_pred[i], 
+                   label=f'{name} (R²={result["r2"]:.3f})', alpha=0.7, markersize=4)
+
+axes[1, 1].set_xlabel('Sample Index')
+axes[1, 1].set_ylabel('Pressure')
+axes[1, 1].set_title('Sample Predictions Comparison')
+axes[1, 1].legend()
+axes[1, 1].grid(True)
 
 plt.tight_layout()
 plt.show()
 
 print("\nDone!")
 
-# Optional: Save the model
-# torch.save(model.state_dict(), 'deep_nn_flow_pressure_model.pth')
-# print("Model saved as 'deep_nn_flow_pressure_model.pth'")
+# Optional: Save best model
+# torch.save(best_result['model'].state_dict(), f'best_model_{best_model_name.lower()}.pth')
+# print(f"Best model ({best_model_name}) saved")
