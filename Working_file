@@ -173,32 +173,7 @@ class DenseRNNDenseModel(nn.Module):
         
         return x
 
-# 4. Dense-LSTM-Dense Model (Uses flow sequences -> pressure)
-class DenseLSTMDenseModel(nn.Module):
-    def __init__(self, dropout=DROPOUT):
-        super(DenseLSTMDenseModel, self).__init__()
-        
-        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
-        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(dropout)
-        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
-        
-    def forward(self, x):
-        # x shape: (batch_size, seq_length)
-        x = x.unsqueeze(-1)  # Add feature dimension
-        
-        lstm_out, _ = self.lstm(x)
-        x = lstm_out[:, -1, :]  # Take last output
-        
-        x = self.dense1(x)
-        x = self.relu1(x)
-        x = self.dropout1(x)
-        x = self.dense2(x)
-        
-        return x
-
-# 5. Deep Neural Network Model (Direct mapping: flow -> pressure, deeper architecture)
+# 4. Deep Neural Network Model (Direct mapping: flow -> pressure, deeper architecture)
 class DeepNNModel(nn.Module):
     def __init__(self, dropout=DROPOUT):
         super(DeepNNModel, self).__init__()
@@ -330,6 +305,14 @@ print("\n" + "="*60)
 print("MODEL COMPARISON")
 print("="*60)
 
+# 📊 NOW COMPARING 5 MODELS:
+
+# 1. **FNN** - Direct flow → pressure mapping
+# 2. **LSTM-Dense-Dense** - Flow+pressure sequences → pressure (your original fixed model)
+# 3. **Dense-RNN-Dense** - Flow sequences → pressure (RNN version) 
+# 4. **Dense-LSTM-Dense** - Flow sequences → pressure (LSTM version)
+# 5. **Deep NN** - Direct flow → pressure mapping (deeper network)
+
 results = {}
 
 # 1. Train FNN Model (uses direct mapping)
@@ -404,10 +387,12 @@ best_r2 = results[best_model_name]['r2']
 print(f"\nBest model: {best_model_name} with R² = {best_r2:.4f}")
 
 # Model comparison insights
-print(f"\n📊 MODEL INSIGHTS:")
-print(f"Direct mapping models: FNN, Deep NN")
-print(f"Sequence models: LSTM-Dense-Dense, Dense-RNN-Dense, Dense-LSTM-Dense")
-print(f"All models include our critical fixes: early stopping, dropout, proper data splits")
+print(f"\n📊 MODEL ARCHITECTURE DETAILS:")
+print(f"✅ FNN: Direct mapping (flow → pressure)")
+print(f"✅ LSTM-Dense-Dense: Sequences of [flow+pressure] → pressure")  
+print(f"✅ Dense-RNN-Dense: Sequences of [flow only] → pressure")
+print(f"✅ Deep NN: Direct mapping (flow → pressure) with deeper layers")
+print(f"\n🔧 All models include: early stopping, dropout, proper data splits, non-overlapping sequences")
 
 # Create plots (same style as our fixed LSTM_model.py with correlation plot)
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
