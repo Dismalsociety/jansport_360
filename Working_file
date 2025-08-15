@@ -3,9 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.model_selection import train_test_split
 import copy
@@ -16,11 +14,7 @@ df = pd.read_excel('')
 flows = df['Flow Rate'].values
 pressures = df['Pressure'].values
 
-print(f"Data points: {len(flows)}")
-print(f"Flow range: {flows.min():.2f} to {flows.max():.2f}")
-print(f"Pressure range: {pressures.min():.2f} to {pressures.max():.2f}")
-
-# Split data FIRST (very important!)
+# Split data FIRST (same as before for fair comparison)
 X_train, X_test, y_train, y_test = train_test_split(
     flows.reshape(-1, 1), pressures, test_size=0.2, random_state=42
 )
@@ -29,202 +23,350 @@ print(f"Training samples: {len(X_train)}")
 print(f"Test samples: {len(X_test)}")
 
 # ========================================
-# MODEL 1: LINEAR REGRESSION (BASELINE)
+# IMPROVED NEURAL NETWORK ARCHITECTURES
 # ========================================
-print("\n=== MODEL 1: LINEAR REGRESSION ===")
-lr_model = LinearRegression()
-lr_model.fit(X_train, y_train)
-lr_pred = lr_model.predict(X_test)
-lr_r2 = r2_score(y_test, lr_pred)
-lr_mse = mean_squared_error(y_test, lr_pred)
 
-print(f"Linear Regression - R²: {lr_r2:.4f}, MSE: {lr_mse:.2f}")
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+def train_neural_network(model, X_train, y_train, X_test, y_test, epochs=500, lr=0.001, patience=50):
+    """Generic training function with early stopping"""
+    
+    # Scale data
+    scaler_X = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+    
+    X_train_scaled = scaler_X.fit_transform(X_train)
+    X_test_scaled = scaler_X.transform(X_test)
+    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+    y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
+    
+    # Convert to tensors
+    X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
+    y_train_tensor = torch.FloatTensor(y_train_scaled).to(device)
+    X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+    
+    # Training setup
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
+    
+    # Training loop with early stopping
+    train_losses = []
+    best_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+    
+    for epoch in range(epochs):
+        model.train()
+        
+        # Forward pass
+        predictions = model(X_train_tensor).squeeze()
+        loss = criterion(predictions, y_train_tensor)
+        
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        
+        train_losses.append(loss.item())
+        scheduler.step(loss)
+        
+        # Early stopping
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_model_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        
+        if patience_counter >= patience:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+    
+    # Restore best model
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    
+    # Test the model
+    model.eval()
+    with torch.no_grad():
+        pred_scaled = model(X_test_tensor).squeeze().cpu().numpy()
+    
+    # Denormalize predictions
+    pred_actual = scaler_y.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
+    r2 = r2_score(y_test, pred_actual)
+    mse = mean_squared_error(y_test, pred_actual)
+    
+    return r2, mse, pred_actual, train_losses
 
 # ========================================
-# MODEL 2: POLYNOMIAL FEATURES
+# MODEL 1: DEEPER NETWORK
 # ========================================
-print("\n=== MODEL 2: POLYNOMIAL REGRESSION ===")
+print("\n=== MODEL 1: DEEPER NETWORK ===")
+class DeeperNN(nn.Module):
+    def __init__(self):
+        super(DeeperNN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(1, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            
+            nn.Linear(64, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            
+            nn.Linear(32, 1)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+deeper_model = DeeperNN().to(device)
+deeper_r2, deeper_mse, deeper_pred, deeper_losses = train_neural_network(
+    deeper_model, X_train, y_train, X_test, y_test, lr=0.001
+)
+print(f"Deeper Network - R²: {deeper_r2:.4f}, MSE: {deeper_mse:.2f}")
+
+# ========================================
+# MODEL 2: POLYNOMIAL FEATURES + NN
+# ========================================
+print("\n=== MODEL 2: POLYNOMIAL FEATURES + NN ===")
 from sklearn.preprocessing import PolynomialFeatures
 
-for degree in [2, 3]:
-    poly_features = PolynomialFeatures(degree=degree)
-    X_train_poly = poly_features.fit_transform(X_train)
-    X_test_poly = poly_features.transform(X_test)
-    
-    lr_poly = LinearRegression()
-    lr_poly.fit(X_train_poly, y_train)
-    poly_pred = lr_poly.predict(X_test_poly)
-    poly_r2 = r2_score(y_test, poly_pred)
-    poly_mse = mean_squared_error(y_test, poly_pred)
-    
-    print(f"Polynomial degree {degree} - R²: {poly_r2:.4f}, MSE: {poly_mse:.2f}")
+# Create polynomial features
+poly_features = PolynomialFeatures(degree=3, include_bias=False)
+X_train_poly = poly_features.fit_transform(X_train)
+X_test_poly = poly_features.transform(X_test)
 
-# ========================================
-# MODEL 3: RANDOM FOREST (Non-linear)
-# ========================================
-print("\n=== MODEL 3: RANDOM FOREST ===")
-rf_model = RandomForestRegressor(n_estimators=100, random_state=42)
-rf_model.fit(X_train, y_train)
-rf_pred = rf_model.predict(X_test)
-rf_r2 = r2_score(y_test, rf_pred)
-rf_mse = mean_squared_error(y_test, rf_pred)
-
-print(f"Random Forest - R²: {rf_r2:.4f}, MSE: {rf_mse:.2f}")
-
-# ========================================
-# MODEL 4: SIMPLE NEURAL NETWORK
-# ========================================
-print("\n=== MODEL 4: SIMPLE NEURAL NETWORK ===")
-
-# Normalize data for neural network
-scaler_X = MinMaxScaler()
-scaler_y = MinMaxScaler()
-
-X_train_scaled = scaler_X.fit_transform(X_train)
-X_test_scaled = scaler_X.transform(X_test)
-y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
-y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
-
-# Convert to tensors
-X_train_tensor = torch.FloatTensor(X_train_scaled)
-y_train_tensor = torch.FloatTensor(y_train_scaled)
-X_test_tensor = torch.FloatTensor(X_test_scaled)
-y_test_tensor = torch.FloatTensor(y_test_scaled)
-
-# Simple neural network
-class SimpleNN(nn.Module):
-    def __init__(self):
-        super(SimpleNN, self).__init__()
+class PolyNN(nn.Module):
+    def __init__(self, input_size):
+        super(PolyNN, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(1, 32),
+            nn.Linear(input_size, 64),
+            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.3),
+            
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            
             nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
             nn.ReLU(),
             nn.Dropout(0.1),
+            
             nn.Linear(16, 1)
         )
     
     def forward(self, x):
         return self.network(x)
 
-# Train simple neural network
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-nn_model = SimpleNN().to(device)
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(nn_model.parameters(), lr=0.01)
-
-# Training loop with early stopping
-train_losses = []
-best_loss = float('inf')
-patience = 20
-patience_counter = 0
-
-for epoch in range(200):
-    nn_model.train()
-    
-    # Forward pass
-    predictions = nn_model(X_train_tensor.to(device)).squeeze()
-    loss = criterion(predictions, y_train_tensor.to(device))
-    
-    # Backward pass
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    train_losses.append(loss.item())
-    
-    # Early stopping
-    if loss.item() < best_loss:
-        best_loss = loss.item()
-        patience_counter = 0
-    else:
-        patience_counter += 1
-    
-    if patience_counter >= patience:
-        print(f"Early stopping at epoch {epoch+1}")
-        break
-
-# Test neural network
-nn_model.eval()
-with torch.no_grad():
-    nn_pred_scaled = nn_model(X_test_tensor.to(device)).squeeze().cpu().numpy()
-
-# Denormalize predictions
-nn_pred = scaler_y.inverse_transform(nn_pred_scaled.reshape(-1, 1)).flatten()
-nn_r2 = r2_score(y_test, nn_pred)
-nn_mse = mean_squared_error(y_test, nn_pred)
-
-print(f"Simple Neural Network - R²: {nn_r2:.4f}, MSE: {nn_mse:.2f}")
+poly_model = PolyNN(X_train_poly.shape[1]).to(device)
+poly_r2, poly_mse, poly_pred, poly_losses = train_neural_network(
+    poly_model, X_train_poly, y_train, X_test_poly, y_test, lr=0.001
+)
+print(f"Polynomial + NN - R²: {poly_r2:.4f}, MSE: {poly_mse:.2f}")
 
 # ========================================
-# COMPARE RESULTS
+# MODEL 3: RESIDUAL NETWORK
 # ========================================
-print("\n" + "="*50)
-print("MODEL COMPARISON")
-print("="*50)
-print(f"{'Model':<25} {'R²':<10} {'MSE':<10}")
-print("-"*50)
-print(f"{'Linear Regression':<25} {lr_r2:<10.4f} {lr_mse:<10.2f}")
-print(f"{'Random Forest':<25} {rf_r2:<10.4f} {rf_mse:<10.2f}")
-print(f"{'Simple Neural Net':<25} {nn_r2:<10.4f} {nn_mse:<10.2f}")
+print("\n=== MODEL 3: RESIDUAL NETWORK ===")
+class ResidualBlock(nn.Module):
+    def __init__(self, dim):
+        super(ResidualBlock, self).__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.BatchNorm1d(dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(dim, dim),
+            nn.BatchNorm1d(dim)
+        )
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        residual = x
+        out = self.layers(x)
+        out += residual  # Skip connection
+        return self.relu(out)
 
-# Find best model
+class ResNet(nn.Module):
+    def __init__(self):
+        super(ResNet, self).__init__()
+        self.input_layer = nn.Sequential(
+            nn.Linear(1, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU()
+        )
+        
+        self.res_blocks = nn.Sequential(
+            ResidualBlock(64),
+            ResidualBlock(64),
+            ResidualBlock(64)
+        )
+        
+        self.output_layer = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(32, 1)
+        )
+    
+    def forward(self, x):
+        x = self.input_layer(x)
+        x = self.res_blocks(x)
+        x = self.output_layer(x)
+        return x
+
+resnet_model = ResNet().to(device)
+resnet_r2, resnet_mse, resnet_pred, resnet_losses = train_neural_network(
+    resnet_model, X_train, y_train, X_test, y_test, lr=0.001
+)
+print(f"ResNet - R²: {resnet_r2:.4f}, MSE: {resnet_mse:.2f}")
+
+# ========================================
+# MODEL 4: ENSEMBLE OF SIMPLE NETWORKS
+# ========================================
+print("\n=== MODEL 4: ENSEMBLE NETWORKS ===")
+class SimpleNet(nn.Module):
+    def __init__(self, hidden_size):
+        super(SimpleNet, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(1, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size, hidden_size//2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_size//2, 1)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+# Train multiple models with different architectures
+ensemble_models = []
+ensemble_preds = []
+
+for i, hidden_size in enumerate([32, 64, 96]):
+    print(f"Training ensemble model {i+1}/3 with hidden_size={hidden_size}")
+    model = SimpleNet(hidden_size).to(device)
+    r2, mse, pred, _ = train_neural_network(model, X_train, y_train, X_test, y_test, epochs=300)
+    ensemble_models.append(model)
+    ensemble_preds.append(pred)
+    print(f"  Model {i+1} - R²: {r2:.4f}")
+
+# Average predictions
+ensemble_pred = np.mean(ensemble_preds, axis=0)
+ensemble_r2 = r2_score(y_test, ensemble_pred)
+ensemble_mse = mean_squared_error(y_test, ensemble_pred)
+print(f"Ensemble Average - R²: {ensemble_r2:.4f}, MSE: {ensemble_mse:.2f}")
+
+# ========================================
+# FINAL COMPARISON
+# ========================================
+print("\n" + "="*60)
+print("NEURAL NETWORK COMPARISON")
+print("="*60)
+print(f"{'Model':<25} {'R²':<10} {'MSE':<12} {'vs RF':<10}")
+print("-"*60)
+
+rf_r2 = 0.5603  # From previous results
 models_results = [
-    ('Linear Regression', lr_r2, lr_pred),
-    ('Random Forest', rf_r2, rf_pred),
-    ('Simple Neural Net', nn_r2, nn_pred)
+    ('Random Forest (baseline)', rf_r2, 4777.89, "100%"),
+    ('Deeper Network', deeper_r2, deeper_mse, f"{deeper_r2/rf_r2*100:.0f}%"),
+    ('Polynomial + NN', poly_r2, poly_mse, f"{poly_r2/rf_r2*100:.0f}%"),
+    ('ResNet', resnet_r2, resnet_mse, f"{resnet_r2/rf_r2*100:.0f}%"),
+    ('Ensemble', ensemble_r2, ensemble_mse, f"{ensemble_r2/rf_r2*100:.0f}%")
 ]
 
-best_model = max(models_results, key=lambda x: x[1])
-print(f"\nBest model: {best_model[0]} with R² = {best_model[1]:.4f}")
+for name, r2, mse, vs_rf in models_results:
+    print(f"{name:<25} {r2:<10.4f} {mse:<12.2f} {vs_rf:<10}")
 
-# ========================================
-# VISUALIZATION
-# ========================================
+# Find best neural network
+best_nn = max(models_results[1:], key=lambda x: x[1])  # Exclude RF baseline
+print(f"\nBest Neural Network: {best_nn[0]} with R² = {best_nn[1]:.4f}")
+
+if best_nn[1] > rf_r2:
+    print("🎉 NEURAL NETWORK BEATS RANDOM FOREST!")
+else:
+    print(f"Neural network achieves {best_nn[1]/rf_r2*100:.0f}% of Random Forest performance")
+
+# Visualization
 fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
-# Plot 1: All predictions vs actual
-axes[0, 0].scatter(y_test, lr_pred, alpha=0.6, label=f'Linear (R²={lr_r2:.3f})')
-axes[0, 0].scatter(y_test, rf_pred, alpha=0.6, label=f'Random Forest (R²={rf_r2:.3f})')
-axes[0, 0].scatter(y_test, nn_pred, alpha=0.6, label=f'Neural Net (R²={nn_r2:.3f})')
+# Plot 1: All neural networks vs actual
+axes[0, 0].scatter(y_test, deeper_pred, alpha=0.6, label=f'Deeper (R²={deeper_r2:.3f})')
+axes[0, 0].scatter(y_test, poly_pred, alpha=0.6, label=f'Poly+NN (R²={poly_r2:.3f})')
+axes[0, 0].scatter(y_test, resnet_pred, alpha=0.6, label=f'ResNet (R²={resnet_r2:.3f})')
+axes[0, 0].scatter(y_test, ensemble_pred, alpha=0.6, label=f'Ensemble (R²={ensemble_r2:.3f})')
 axes[0, 0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
 axes[0, 0].set_xlabel('Actual Pressure')
 axes[0, 0].set_ylabel('Predicted Pressure')
-axes[0, 0].set_title('All Models: Predictions vs Actual')
+axes[0, 0].set_title('Neural Networks: Predictions vs Actual')
 axes[0, 0].legend()
 axes[0, 0].grid(True)
 
-# Plot 2: Best model details
-best_pred = best_model[2]
-axes[0, 1].scatter(y_test, best_pred, alpha=0.6)
+# Plot 2: Best neural network
+best_pred = ensemble_pred if ensemble_r2 == best_nn[1] else (
+    deeper_pred if deeper_r2 == best_nn[1] else (
+    poly_pred if poly_r2 == best_nn[1] else resnet_pred
+))
+
+axes[0, 1].scatter(y_test, best_pred, alpha=0.6, color='blue')
 axes[0, 1].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
 axes[0, 1].set_xlabel('Actual Pressure')
 axes[0, 1].set_ylabel('Predicted Pressure')
-axes[0, 1].set_title(f'Best Model: {best_model[0]}')
+axes[0, 1].set_title(f'Best NN: {best_nn[0]} (R²={best_nn[1]:.4f})')
 axes[0, 1].grid(True)
 
-# Plot 3: Residuals
-residuals = y_test - best_pred
-axes[1, 0].scatter(best_pred, residuals, alpha=0.6)
-axes[1, 0].axhline(y=0, color='r', linestyle='--')
-axes[1, 0].set_xlabel('Predicted Pressure')
-axes[1, 0].set_ylabel('Residuals')
-axes[1, 0].set_title('Residuals Plot')
+# Plot 3: Training losses
+axes[1, 0].plot(deeper_losses, label='Deeper Network', alpha=0.7)
+axes[1, 0].plot(poly_losses, label='Polynomial + NN', alpha=0.7)
+axes[1, 0].plot(resnet_losses, label='ResNet', alpha=0.7)
+axes[1, 0].set_xlabel('Epoch')
+axes[1, 0].set_ylabel('Training Loss')
+axes[1, 0].set_title('Training Curves')
+axes[1, 0].legend()
 axes[1, 0].grid(True)
 
-# Plot 4: Training loss (for neural network)
-axes[1, 1].plot(train_losses)
-axes[1, 1].set_xlabel('Epoch')
-axes[1, 1].set_ylabel('Training Loss')
-axes[1, 1].set_title('Neural Network Training Loss')
-axes[1, 1].grid(True)
+# Plot 4: R² comparison
+model_names = ['Random\nForest', 'Deeper\nNetwork', 'Poly+NN', 'ResNet', 'Ensemble']
+r2_values = [rf_r2, deeper_r2, poly_r2, resnet_r2, ensemble_r2]
+colors = ['green'] + ['blue']*4
+
+bars = axes[1, 1].bar(model_names, r2_values, color=colors, alpha=0.7)
+axes[1, 1].axhline(y=rf_r2, color='red', linestyle='--', label='RF Baseline')
+axes[1, 1].set_ylabel('R² Score')
+axes[1, 1].set_title('Model Performance Comparison')
+axes[1, 1].legend()
+axes[1, 1].grid(True, alpha=0.3)
+
+# Add value labels on bars
+for bar, value in zip(bars, r2_values):
+    axes[1, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
+                   f'{value:.3f}', ha='center', va='bottom')
 
 plt.tight_layout()
 plt.show()
 
-print("\nNext steps:")
-print("1. If Random Forest wins, your data has non-linear patterns")
-print("2. If Linear Regression wins, relationships are mostly linear")
-print("3. If Neural Network wins, we can build more complex networks")
-print("4. Any model with R² > 0.24 beats your baseline!")
+print("\nConclusion:")
+print("- Random Forest found complex non-linear patterns in your data")
+print("- Neural networks can learn these patterns with proper architecture")
+print("- Ensemble methods often work best for real-world engineering data")
