@@ -40,11 +40,11 @@ pressures_normalized = scaler_pressure.fit_transform(pressures.reshape(-1, 1)).f
 print(f"Normalized flow range: {flows_normalized.min():.3f} to {flows_normalized.max():.3f}")
 print(f"Normalized pressure range: {pressures_normalized.min():.3f} to {pressures_normalized.max():.3f}")
 
-# Combine data
+# Combine data for sequence models
 data_normalized = np.column_stack([flows_normalized, pressures_normalized])
 
-# Create non-overlapping sequences for sequence-based models
-print("Creating sequences...")
+# Create sequences for LSTM models (like original LSTM_model.py)
+print("Creating sequences for LSTM models...")
 def create_sequences_no_overlap(data, seq_length):
     X_data = []
     Y_data = []
@@ -52,26 +52,25 @@ def create_sequences_no_overlap(data, seq_length):
     step_size = seq_length
     for i in range(0, len(data) - seq_length, step_size):
         if i + seq_length < len(data):
-            # For flow-only sequence models
-            input_seq = data[i:i+seq_length, 0]  # Flow sequence
+            input_seq = data[i:i+seq_length]
             X_data.append(input_seq)
             
-            # Target: next pressure value
             target_pressure = data[i+seq_length, 1]
             Y_data.append(target_pressure)
     
     return np.array(X_data), np.array(Y_data)
 
-# For LSTM-style models (sequences)
 X_seq, Y_seq = create_sequences_no_overlap(data_normalized, SEQ_LENGTH)
 print(f"Created {len(X_seq)} sequences")
 
-# For direct mapping models (flow -> pressure)
+# Create direct mapping data for FNN (flow -> pressure)
+print("Creating direct mapping for FNN...")
 X_direct = flows_normalized.reshape(-1, 1)
 Y_direct = pressures_normalized
 
-# Data splitting with shuffling
-print("Splitting data...")
+print(f"Direct mapping: {len(X_direct)} samples")
+
+# Data splitting function (same as LSTM_model.py)
 def split_data(X, Y, test_size=0.2):
     indices = np.random.permutation(len(X))
     X_shuffled = X[indices]
@@ -85,147 +84,111 @@ def split_data(X, Y, test_size=0.2):
     
     return X_train, Y_train, X_test, Y_test
 
-# Split sequence data
-X_seq_train, Y_seq_train, X_seq_test, Y_seq_test = split_data(X_seq, Y_seq)
+# Model Definitions (simplified, no batch norm)
 
-# Split direct mapping data  
-X_direct_train, Y_direct_train, X_direct_test, Y_direct_test = split_data(X_direct, Y_direct)
-
-print(f"Sequence training samples: {len(X_seq_train)}")
-print(f"Direct mapping training samples: {len(X_direct_train)}")
-
-# Model Definitions
+# 1. Simple FNN Model
 class FNNModel(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout=DROPOUT):
         super(FNNModel, self).__init__()
-        self.network = nn.Sequential(
+        
+        self.layers = nn.Sequential(
             nn.Linear(1, HIDDEN_SIZE * 2),
             nn.ReLU(),
-            nn.Dropout(DROPOUT),
+            nn.Dropout(dropout),
             nn.Linear(HIDDEN_SIZE * 2, HIDDEN_SIZE),
             nn.ReLU(),
-            nn.Dropout(DROPOUT),
+            nn.Dropout(dropout),
             nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2),
             nn.ReLU(),
-            nn.Dropout(DROPOUT / 2),
+            nn.Dropout(dropout),
             nn.Linear(HIDDEN_SIZE // 2, 1)
         )
-    
+        
     def forward(self, x):
-        return self.network(x).squeeze()
+        return self.layers(x)
 
-class DenseRNNDenseModel(nn.Module):
-    def __init__(self):
-        super(DenseRNNDenseModel, self).__init__()
-        self.rnn = nn.RNN(1, HIDDEN_SIZE, batch_first=True)
-        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(DROPOUT)
-        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
-    
-    def forward(self, x):
-        x = x.unsqueeze(-1)  # Add feature dimension
-        rnn_out, _ = self.rnn(x)
-        x = rnn_out[:, -1, :]  # Last output
-        x = self.dense1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.dense2(x)
-        return x.squeeze()
-
-class DenseLSTMDenseModel(nn.Module):
-    def __init__(self):
-        super(DenseLSTMDenseModel, self).__init__()
-        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
-        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(DROPOUT)
-        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
-    
-    def forward(self, x):
-        x = x.unsqueeze(-1)  # Add feature dimension
-        lstm_out, _ = self.lstm(x)
-        x = lstm_out[:, -1, :]  # Last output
-        x = self.dense1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.dense2(x)
-        return x.squeeze()
-
+# 2. LSTM Model (same as your fixed LSTM_model.py)
 class LSTMModel(nn.Module):
-    def __init__(self):
+    def __init__(self, dropout=DROPOUT):
         super(LSTMModel, self).__init__()
-        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
-        self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE // 2)
+        
+        self.lstm = nn.LSTM(input_size=2, hidden_size=HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE)
         self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(DROPOUT)
-        self.dense2 = nn.Linear(DENSE_SIZE // 2, 1)
-    
-    def forward(self, x):
-        x = x.unsqueeze(-1)  # Add feature dimension
-        lstm_out, _ = self.lstm(x)
-        x = lstm_out[:, -1, :]  # Last output
-        x = self.dense1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.dense2(x)
-        return x.squeeze()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(DENSE_SIZE, 1)
 
-class DeepNNModel(nn.Module):
-    def __init__(self):
-        super(DeepNNModel, self).__init__()
-        # Deep network with 4 hidden layers
-        self.dense1 = nn.Linear(1, 128)
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(DROPOUT)
-        
-        self.dense2 = nn.Linear(128, 96)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(DROPOUT)
-        
-        self.dense3 = nn.Linear(96, 64)
-        self.relu3 = nn.ReLU()
-        self.dropout3 = nn.Dropout(DROPOUT)
-        
-        self.dense4 = nn.Linear(64, 32)
-        self.relu4 = nn.ReLU()
-        self.dropout4 = nn.Dropout(DROPOUT)
-        
-        self.output = nn.Linear(32, 1)
-    
     def forward(self, x):
+        lstm_out, (hidden, cell) = self.lstm(x)
+        last_hidden = hidden[-1]
+        
+        x = self.dense1(last_hidden)
+        x = self.relu(x)
+        x = self.dropout1(x)
+        predictions = self.dense2(x)
+        return predictions
+
+# 3. Dense-LSTM-Dense Model
+class DenseLSTMDenseModel(nn.Module):
+    def __init__(self, dropout=DROPOUT):
+        super(DenseLSTMDenseModel, self).__init__()
+        
+        self.lstm = nn.LSTM(1, HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        x = x.unsqueeze(-1)  # Add feature dimension
+        
+        lstm_out, _ = self.lstm(x)
+        x = lstm_out[:, -1, :]  # Take last output
+        
         x = self.dense1(x)
         x = self.relu1(x)
         x = self.dropout1(x)
-        
         x = self.dense2(x)
-        x = self.relu2(x)
-        x = self.dropout2(x)
         
-        x = self.dense3(x)
-        x = self.relu3(x)
-        x = self.dropout3(x)
-        
-        x = self.dense4(x)
-        x = self.relu4(x)
-        x = self.dropout4(x)
-        
-        x = self.output(x)
-        return x.squeeze()
+        return x
 
-# Training function
-def train_model(model, X_train, Y_train, X_test, Y_test, model_name):
-    print(f"\n=== Training {model_name} ===")
+# 4. Deep Neural Network Model
+class DeepNNModel(nn.Module):
+    def __init__(self, dropout=DROPOUT):
+        super(DeepNNModel, self).__init__()
+        
+        self.network = nn.Sequential(
+            nn.Linear(1, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 96),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(96, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1)
+        )
     
-    # Loss function and optimizer
+    def forward(self, x):
+        return self.network(x)
+
+# Training function (same style as LSTM_model.py)
+def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOCHS):
+    print(f"\nTraining {model_name}...")
+    
+    # Loss function and optimizer (same as LSTM_model.py)
     MSE = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
-    # Training and validation lists
     train_losses = []
     val_losses = []
     
-    # Create validation set from last 20% of training data
+    # Create validation set (same as LSTM_model.py)
     val_split = int(0.8 * len(X_train))
     X_train_sub = X_train[:val_split]
     Y_train_sub = Y_train[:val_split]
@@ -241,38 +204,38 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name):
     patience_counter = 0
     best_model_state = None
     
-    for epoch in range(EPOCHS):
+    for epoch in range(epochs):
         total_loss = 0
         num_batches = 0
-        
+
         # Set model to training mode
         model.train()
         
-        # Train on batches
+        # Train on batches (same as LSTM_model.py)
         for i in range(0, len(X_train_sub), BATCH_SIZE):
             batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
             batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
-            
+
             # Forward pass
-            predictions = model(batch_X)
+            predictions = model(batch_X).squeeze()
             loss = MSE(predictions, batch_Y)
-            
+
             # Backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
+
             total_loss += loss.item()
             num_batches += 1
-        
+
         # Average loss
         avg_loss = total_loss / num_batches
         train_losses.append(avg_loss)
-        
+
         # Validation loss
         model.eval()
         with torch.no_grad():
-            val_outputs = model(X_val.to(device))
+            val_outputs = model(X_val.to(device)).squeeze()
             val_loss = MSE(val_outputs, Y_val.to(device))
             val_losses.append(val_loss.item())
         
@@ -287,146 +250,160 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name):
         if patience_counter >= patience:
             print(f"Early stopping at epoch {epoch+1}")
             break
-        
+
         if (epoch + 1) % 50 == 0:
-            print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Patience: {patience_counter}/{patience}')
-    
+            print(f'Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}')
+
     # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
         print(f"Restored best model with validation loss: {best_val_loss:.4f}")
     
-    # Testing
-    print("Testing model...")
+    # Test the model
     model.eval()
     with torch.no_grad():
-        test_predictions = model(X_test.to(device)).cpu().numpy()
+        test_predictions = model(X_test.to(device)).squeeze().cpu().numpy()
         test_targets = Y_test.cpu().numpy()
-    
+
     # Convert back to original scale
     predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
     targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
-    
+
     # Calculate metrics
     r2 = r2_score(targets_actual, predictions_actual)
     mse = np.mean((targets_actual - predictions_actual) ** 2)
-    mae = np.mean(np.abs(targets_actual - predictions_actual))
     
-    print(f"R²: {r2:.4f}")
-    print(f"MSE: {mse:.2f}")
-    print(f"MAE: {mae:.2f}")
+    print(f"{model_name} - R²: {r2:.4f}, MSE: {mse:.2f}")
     
-    return {
-        'model': model,
-        'r2': r2,
-        'mse': mse,
-        'mae': mae,
-        'predictions': predictions_actual,
-        'targets': targets_actual,
-        'train_losses': train_losses,
-        'val_losses': val_losses
-    }
+    return r2, mse, predictions_actual, targets_actual, train_losses, val_losses
 
-# Train all models
+# Main training and comparison
+print("\n" + "="*60)
+print("MODEL COMPARISON")
+print("="*60)
+
 results = {}
 
-# Train FNN (uses direct mapping)
+# 1. Train FNN Model (uses direct mapping)
+X_train_direct, Y_train_direct, X_test_direct, Y_test_direct = split_data(X_direct, Y_direct)
 fnn_model = FNNModel().to(device)
-results['FNN'] = train_model(fnn_model, X_direct_train, Y_direct_train, X_direct_test, Y_direct_test, 'FNN')
+fnn_r2, fnn_mse, fnn_pred, fnn_targets, fnn_train_loss, fnn_val_loss = train_model(
+    fnn_model, X_train_direct, Y_train_direct, X_test_direct, Y_test_direct, "FNN"
+)
+results['FNN'] = {
+    'r2': fnn_r2, 'mse': fnn_mse, 'pred': fnn_pred, 'targets': fnn_targets,
+    'train_losses': fnn_train_loss, 'val_losses': fnn_val_loss
+}
 
-# Train Deep NN (uses direct mapping)
-deep_nn_model = DeepNNModel().to(device)
-results['Deep NN'] = train_model(deep_nn_model, X_direct_train, Y_direct_train, X_direct_test, Y_direct_test, 'Deep NN')
-
-# Train Dense-RNN-Dense (uses sequences)
-rnn_model = DenseRNNDenseModel().to(device)
-results['Dense-RNN-Dense'] = train_model(rnn_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'Dense-RNN-Dense')
-
-# Train Dense-LSTM-Dense (uses sequences)
-lstm_dense_model = DenseLSTMDenseModel().to(device)
-results['Dense-LSTM-Dense'] = train_model(lstm_dense_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'Dense-LSTM-Dense')
-
-# Train LSTM (uses sequences)
+# 2. Train LSTM Model (uses sequences)
+X_train_seq, Y_train_seq, X_test_seq, Y_test_seq = split_data(X_seq, Y_seq)
 lstm_model = LSTMModel().to(device)
-results['LSTM'] = train_model(lstm_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'LSTM')
+lstm_r2, lstm_mse, lstm_pred, lstm_targets, lstm_train_loss, lstm_val_loss = train_model(
+    lstm_model, X_train_seq, Y_train_seq, X_test_seq, Y_test_seq, "LSTM"
+)
+results['LSTM'] = {
+    'r2': lstm_r2, 'mse': lstm_mse, 'pred': lstm_pred, 'targets': lstm_targets,
+    'train_losses': lstm_train_loss, 'val_losses': lstm_val_loss
+}
+
+# 3. Train Dense-LSTM-Dense Model (uses flow sequences only)
+# Create flow-only sequences
+flow_seq = []
+pressure_targets = []
+for i in range(0, len(flows_normalized) - SEQ_LENGTH, SEQ_LENGTH):
+    if i + SEQ_LENGTH < len(flows_normalized):
+        flow_seq.append(flows_normalized[i:i+SEQ_LENGTH])
+        pressure_targets.append(pressures_normalized[i+SEQ_LENGTH])
+
+flow_seq = np.array(flow_seq)
+pressure_targets = np.array(pressure_targets)
+
+X_train_flow, Y_train_flow, X_test_flow, Y_test_flow = split_data(flow_seq, pressure_targets)
+dense_lstm_model = DenseLSTMDenseModel().to(device)
+dlstm_r2, dlstm_mse, dlstm_pred, dlstm_targets, dlstm_train_loss, dlstm_val_loss = train_model(
+    dense_lstm_model, X_train_flow, Y_train_flow, X_test_flow, Y_test_flow, "Dense-LSTM-Dense"
+)
+results['Dense-LSTM-Dense'] = {
+    'r2': dlstm_r2, 'mse': dlstm_mse, 'pred': dlstm_pred, 'targets': dlstm_targets,
+    'train_losses': dlstm_train_loss, 'val_losses': dlstm_val_loss
+}
+
+# 4. Train Deep NN Model (uses direct mapping)
+deep_nn_model = DeepNNModel().to(device)
+deep_r2, deep_mse, deep_pred, deep_targets, deep_train_loss, deep_val_loss = train_model(
+    deep_nn_model, X_train_direct, Y_train_direct, X_test_direct, Y_test_direct, "Deep NN"
+)
+results['Deep NN'] = {
+    'r2': deep_r2, 'mse': deep_mse, 'pred': deep_pred, 'targets': deep_targets,
+    'train_losses': deep_train_loss, 'val_losses': deep_val_loss
+}
 
 # Print comparison results
-print("\n" + "="*70)
-print("MODEL COMPARISON RESULTS")
-print("="*70)
-print(f"{'Model':<20} {'R²':<10} {'MSE':<10} {'MAE':<10}")
-print("-"*70)
+print("\n" + "="*60)
+print("FINAL RESULTS")
+print("="*60)
+print(f"{'Model':<20} {'R²':<10} {'MSE':<10}")
+print("-"*40)
 
 for model_name, result in results.items():
-    print(f"{model_name:<20} {result['r2']:<10.4f} {result['mse']:<10.2f} {result['mae']:<10.2f}")
+    print(f"{model_name:<20} {result['r2']:<10.4f} {result['mse']:<10.2f}")
 
 # Find best model
-best_model_name = max(results.keys(), key=lambda x: results[x]['r2'])
-best_result = results[best_model_name]
-print(f"\nBest model: {best_model_name} with R² = {best_result['r2']:.4f}")
+best_model_name = max(results.items(), key=lambda x: x[1]['r2'])[0]
+best_r2 = results[best_model_name]['r2']
+print(f"\nBest model: {best_model_name} with R² = {best_r2:.4f}")
 
-# Create plots for all models
+# Create plots (same style as LSTM_model.py)
 fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 
 # Plot 1: R² comparison
 model_names = list(results.keys())
 r2_values = [results[name]['r2'] for name in model_names]
-colors = ['blue', 'purple', 'green', 'red', 'orange']  # Added purple for Deep NN
 
-bars = axes[0, 0].bar(model_names, r2_values, color=colors[:len(model_names)], alpha=0.7)
+axes[0, 0].bar(model_names, r2_values, alpha=0.7)
 axes[0, 0].set_ylabel('R² Score')
 axes[0, 0].set_title('Model Performance Comparison')
-axes[0, 0].set_xticklabels(model_names, rotation=45, ha='right')  # Rotate labels for better fit
+axes[0, 0].tick_params(axis='x', rotation=45)
 axes[0, 0].grid(True, alpha=0.3)
 
 # Add value labels on bars
-for bar, value in zip(bars, r2_values):
-    axes[0, 0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
-                   f'{value:.3f}', ha='center', va='bottom')
+for i, (name, value) in enumerate(zip(model_names, r2_values)):
+    axes[0, 0].text(i, value + 0.01, f'{value:.3f}', ha='center', va='bottom')
 
-# Plot 2: Best model predictions vs actual
-best_pred = best_result['predictions']
-best_targets = best_result['targets']
-
-axes[0, 1].scatter(best_targets, best_pred, alpha=0.6, s=50)
-axes[0, 1].plot([best_targets.min(), best_targets.max()], 
-               [best_targets.min(), best_targets.max()], 'r--', lw=2)
+# Plot 2: Best model predictions
+best_result = results[best_model_name]
+axes[0, 1].scatter(best_result['targets'], best_result['pred'], alpha=0.6)
+axes[0, 1].plot([best_result['targets'].min(), best_result['targets'].max()], 
+                [best_result['targets'].min(), best_result['targets'].max()], 'r--', lw=2)
 axes[0, 1].set_xlabel('Actual Pressure')
 axes[0, 1].set_ylabel('Predicted Pressure')
-axes[0, 1].set_title(f'Best Model: {best_model_name} (R²={best_result["r2"]:.4f})')
+axes[0, 1].set_title(f'Best Model: {best_model_name} (R²={best_r2:.4f})')
 axes[0, 1].grid(True)
 
 # Plot 3: Training curves for best model
-best_train_losses = best_result['train_losses']
-best_val_losses = best_result['val_losses']
-
-axes[1, 0].plot(best_train_losses, label='Train Loss', alpha=0.7)
-axes[1, 0].plot(best_val_losses, label='Val Loss', alpha=0.7)
+axes[1, 0].plot(best_result['train_losses'], label='Train Loss')
+axes[1, 0].plot(best_result['val_losses'], label='Val Loss')
 axes[1, 0].set_xlabel('Epoch')
 axes[1, 0].set_ylabel('Loss')
 axes[1, 0].set_title(f'{best_model_name} Training Curves')
 axes[1, 0].legend()
 axes[1, 0].grid(True)
 
-# Plot 4: All model predictions comparison (sample)
-axes[1, 1].plot(best_targets[:20], 'ko-', label='Actual', markersize=6)
-colors_pred = ['blue', 'purple', 'green', 'red', 'orange']  # Added purple for Deep NN
+# Plot 4: All predictions vs actual
+colors = ['blue', 'red', 'green', 'orange']
 for i, (name, result) in enumerate(results.items()):
-    pred_sample = result['predictions'][:20]
-    axes[1, 1].plot(pred_sample, 'o-', color=colors_pred[i], 
-                   label=f'{name} (R²={result["r2"]:.3f})', alpha=0.7, markersize=4)
+    axes[1, 1].scatter(result['targets'], result['pred'], alpha=0.5, 
+                      label=f'{name} (R²={result["r2"]:.3f})', color=colors[i])
 
-axes[1, 1].set_xlabel('Sample Index')
-axes[1, 1].set_ylabel('Pressure')
-axes[1, 1].set_title('Sample Predictions Comparison')
-axes[1, 1].legend(fontsize=8)  # Smaller font for 5 models
+axes[1, 1].plot([0, max([max(r['targets']) for r in results.values()])], 
+                [0, max([max(r['targets']) for r in results.values()])], 'k--', lw=1)
+axes[1, 1].set_xlabel('Actual Pressure')
+axes[1, 1].set_ylabel('Predicted Pressure')
+axes[1, 1].set_title('All Models: Predictions vs Actual')
+axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(True)
 
 plt.tight_layout()
 plt.show()
 
 print("\nDone!")
-
-# Optional: Save best model
-# torch.save(best_result['model'].state_dict(), f'best_model_{best_model_name.lower()}.pth')
-# print(f"Best model ({best_model_name}) saved")
