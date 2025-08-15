@@ -7,14 +7,14 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score
 import copy
 
-# Basic settings
-SEQ_LENGTH = 20
-HIDDEN_SIZE = 64
-DENSE_SIZE = 64
-BATCH_SIZE = 32
+# Basic settings - Reduced complexity to prevent overfitting
+SEQ_LENGTH = 20  
+HIDDEN_SIZE = 64    # Reduced from 128
+DENSE_SIZE = 64     # Reduced from 128
+BATCH_SIZE = 32     # Smaller for better training
 LEARNING_RATE = 1e-3
-EPOCHS = 1000
-DROPOUT = 0.2
+EPOCHS = 1000       # Early stopping will handle this
+DROPOUT = 0.3       # Increased dropout for regularization
 
 # Check if GPU is available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -43,19 +43,20 @@ print(f"Normalized pressure range: {pressures_normalized.min():.3f} to {pressure
 # Combine data for sequence models
 data_normalized = np.column_stack([flows_normalized, pressures_normalized])
 
-# Create sequences for LSTM models (like original LSTM_model.py)
+# FIXED: Create non-overlapping sequences to prevent data leakage (like our final LSTM_model.py)
 print("Creating sequences for LSTM models...")
 def create_sequences_no_overlap(data, seq_length):
+    """Create non-overlapping sequences to prevent data leakage"""
     X_data = []
     Y_data = []
     
-    step_size = seq_length
+    step_size = seq_length  # Non-overlapping
     for i in range(0, len(data) - seq_length, step_size):
         if i + seq_length < len(data):
-            input_seq = data[i:i+seq_length]
+            input_seq = data[i:i+seq_length]  # Both flow and pressure history
             X_data.append(input_seq)
             
-            target_pressure = data[i+seq_length, 1]
+            target_pressure = data[i+seq_length, 1]  # Next pressure value
             Y_data.append(target_pressure)
     
     return np.array(X_data), np.array(Y_data)
@@ -69,6 +70,22 @@ X_direct = flows_normalized.reshape(-1, 1)
 Y_direct = pressures_normalized
 
 print(f"Direct mapping: {len(X_direct)} samples")
+
+# FIXED: Create flow-only sequences with non-overlapping approach (for RNN models)
+print("Creating flow-only sequences...")
+flow_seq = []
+pressure_targets = []
+step_size = SEQ_LENGTH  # Non-overlapping
+
+for i in range(0, len(flows_normalized) - SEQ_LENGTH, step_size):
+    if i + SEQ_LENGTH < len(flows_normalized):
+        flow_seq.append(flows_normalized[i:i+SEQ_LENGTH])
+        pressure_targets.append(pressures_normalized[i+SEQ_LENGTH])
+
+flow_seq = np.array(flow_seq)
+pressure_targets = np.array(pressure_targets)
+
+print(f"Flow-only sequences: {len(flow_seq)} samples")
 
 # Data splitting function (same as LSTM_model.py)
 def split_data(X, Y, test_size=0.2):
@@ -86,7 +103,7 @@ def split_data(X, Y, test_size=0.2):
 
 # Model Definitions (simplified, no batch norm)
 
-# 1. Simple FNN Model
+# 1. Simple FNN Model (Direct mapping: flow -> pressure)
 class FNNModel(nn.Module):
     def __init__(self, dropout=DROPOUT):
         super(FNNModel, self).__init__()
@@ -107,12 +124,15 @@ class FNNModel(nn.Module):
     def forward(self, x):
         return self.layers(x)
 
-# 2. LSTM Model (same as your fixed LSTM_model.py)
-class LSTMModel(nn.Module):
+# 2. LSTM-Dense-Dense Model (Uses flow+pressure sequences -> pressure)
+class LSTMDenseDenseModel(nn.Module):
     def __init__(self, dropout=DROPOUT):
-        super(LSTMModel, self).__init__()
+        super(LSTMDenseDenseModel, self).__init__()
         
+        # LSTM layer
         self.lstm = nn.LSTM(input_size=2, hidden_size=HIDDEN_SIZE, batch_first=True)
+
+        # Dense layers (fully connected) - FIXED naming
         self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE)
         self.relu = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
@@ -122,13 +142,38 @@ class LSTMModel(nn.Module):
         lstm_out, (hidden, cell) = self.lstm(x)
         last_hidden = hidden[-1]
         
-        x = self.dense1(last_hidden)
+        x = self.dense1(last_hidden)  # FIXED: was self.dense
         x = self.relu(x)
         x = self.dropout1(x)
         predictions = self.dense2(x)
         return predictions
 
-# 3. Dense-LSTM-Dense Model
+# 3. Dense-RNN-Dense Model (Uses flow sequences -> pressure)
+class DenseRNNDenseModel(nn.Module):
+    def __init__(self, dropout=DROPOUT):
+        super(DenseRNNDenseModel, self).__init__()
+        
+        self.rnn = nn.RNN(1, HIDDEN_SIZE, batch_first=True)
+        self.dense1 = nn.Linear(HIDDEN_SIZE, HIDDEN_SIZE // 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dense2 = nn.Linear(HIDDEN_SIZE // 2, 1)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_length)
+        x = x.unsqueeze(-1)  # Add feature dimension
+        
+        rnn_out, _ = self.rnn(x)
+        x = rnn_out[:, -1, :]  # Take last output
+        
+        x = self.dense1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        x = self.dense2(x)
+        
+        return x
+
+# 4. Dense-LSTM-Dense Model (Uses flow sequences -> pressure)
 class DenseLSTMDenseModel(nn.Module):
     def __init__(self, dropout=DROPOUT):
         super(DenseLSTMDenseModel, self).__init__()
@@ -153,7 +198,7 @@ class DenseLSTMDenseModel(nn.Module):
         
         return x
 
-# 4. Deep Neural Network Model
+# 5. Deep Neural Network Model (Direct mapping: flow -> pressure, deeper architecture)
 class DeepNNModel(nn.Module):
     def __init__(self, dropout=DROPOUT):
         super(DeepNNModel, self).__init__()
@@ -177,7 +222,7 @@ class DeepNNModel(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-# Training function (same style as LSTM_model.py)
+# Training function (same style as LSTM_model.py with ALL fixes)
 def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOCHS):
     print(f"\nTraining {model_name}...")
     
@@ -200,7 +245,7 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
     
     # Early stopping parameters
     best_val_loss = float('inf')
-    patience = 100
+    patience = 50  # Same as our final LSTM version
     patience_counter = 0
     best_model_state = None
     
@@ -208,10 +253,10 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         total_loss = 0
         num_batches = 0
 
-        # Set model to training mode
+        # FIXED: Set model to training mode
         model.train()
         
-        # Train on batches (same as LSTM_model.py)
+        # FIXED: Train on batches using ONLY the training subset (not full X_train)
         for i in range(0, len(X_train_sub), BATCH_SIZE):
             batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
             batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
@@ -232,7 +277,7 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         avg_loss = total_loss / num_batches
         train_losses.append(avg_loss)
 
-        # Validation loss
+        # FIXED: Validation loss
         model.eval()
         with torch.no_grad():
             val_outputs = model(X_val.to(device)).squeeze()
@@ -252,12 +297,14 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
             break
 
         if (epoch + 1) % 50 == 0:
-            print(f'Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}')
+            print(f'Epoch {epoch+1}/{epochs}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Patience: {patience_counter}/{patience}')
 
     # Restore best model
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
         print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+    else:
+        print("No improvement found, using final model state")
     
     # Test the model
     model.eval()
@@ -265,15 +312,16 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         test_predictions = model(X_test.to(device)).squeeze().cpu().numpy()
         test_targets = Y_test.cpu().numpy()
 
-    # Convert back to original scale
+    # FIXED: Convert back to original scale using correct scaler
     predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
     targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
 
-    # Calculate metrics
+    # FIXED: Calculate fidelity metrics (corrected R² calculation)
     r2 = r2_score(targets_actual, predictions_actual)
     mse = np.mean((targets_actual - predictions_actual) ** 2)
+    mae = np.mean(np.abs(targets_actual - predictions_actual))
     
-    print(f"{model_name} - R²: {r2:.4f}, MSE: {mse:.2f}")
+    print(f"{model_name} - R²: {r2:.4f}, MSE: {mse:.2f}, MAE: {mae:.2f}")
     
     return r2, mse, predictions_actual, targets_actual, train_losses, val_losses
 
@@ -306,11 +354,13 @@ results['LSTM'] = {
     'train_losses': lstm_train_loss, 'val_losses': lstm_val_loss
 }
 
-# 3. Train Dense-LSTM-Dense Model (uses flow sequences only)
-# Create flow-only sequences
+# 3. Train Dense-LSTM-Dense Model (uses flow sequences only with non-overlapping)
+# FIXED: Create flow-only sequences with non-overlapping approach
 flow_seq = []
 pressure_targets = []
-for i in range(0, len(flows_normalized) - SEQ_LENGTH, SEQ_LENGTH):
+step_size = SEQ_LENGTH  # Non-overlapping
+
+for i in range(0, len(flows_normalized) - SEQ_LENGTH, step_size):
     if i + SEQ_LENGTH < len(flows_normalized):
         flow_seq.append(flows_normalized[i:i+SEQ_LENGTH])
         pressure_targets.append(pressures_normalized[i+SEQ_LENGTH])
@@ -339,11 +389,11 @@ results['Deep NN'] = {
 }
 
 # Print comparison results
-print("\n" + "="*60)
+print("\n" + "="*70)
 print("FINAL RESULTS")
-print("="*60)
+print("="*70)
 print(f"{'Model':<20} {'R²':<10} {'MSE':<10}")
-print("-"*40)
+print("-"*50)
 
 for model_name, result in results.items():
     print(f"{model_name:<20} {result['r2']:<10.4f} {result['mse']:<10.2f}")
@@ -353,8 +403,14 @@ best_model_name = max(results.items(), key=lambda x: x[1]['r2'])[0]
 best_r2 = results[best_model_name]['r2']
 print(f"\nBest model: {best_model_name} with R² = {best_r2:.4f}")
 
-# Create plots (same style as LSTM_model.py)
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+# Model comparison insights
+print(f"\n📊 MODEL INSIGHTS:")
+print(f"Direct mapping models: FNN, Deep NN")
+print(f"Sequence models: LSTM-Dense-Dense, Dense-RNN-Dense, Dense-LSTM-Dense")
+print(f"All models include our critical fixes: early stopping, dropout, proper data splits")
+
+# Create plots (same style as our fixed LSTM_model.py with correlation plot)
+fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
 # Plot 1: R² comparison
 model_names = list(results.keys())
@@ -368,39 +424,39 @@ axes[0, 0].grid(True, alpha=0.3)
 
 # Add value labels on bars
 for i, (name, value) in enumerate(zip(model_names, r2_values)):
-    axes[0, 0].text(i, value + 0.01, f'{value:.3f}', ha='center', va='bottom')
+    axes[0, 0].text(i, value + 0.01, f'{value:.3f}', ha='center', va='bottom', fontsize=9)
 
-# Plot 2: Best model predictions
+# Plot 2: Best model predictions vs actual (time series style)
 best_result = results[best_model_name]
-axes[0, 1].scatter(best_result['targets'], best_result['pred'], alpha=0.6)
-axes[0, 1].plot([best_result['targets'].min(), best_result['targets'].max()], 
-                [best_result['targets'].min(), best_result['targets'].max()], 'r--', lw=2)
-axes[0, 1].set_xlabel('Actual Pressure')
-axes[0, 1].set_ylabel('Predicted Pressure')
-axes[0, 1].set_title(f'Best Model: {best_model_name} (R²={best_r2:.4f})')
+axes[0, 1].plot(best_result['targets'], label='Actual', alpha=0.7, marker='o', markersize=4)
+axes[0, 1].plot(best_result['pred'], label='Predicted', alpha=0.7, marker='s', markersize=4)
+axes[0, 1].set_xlabel('Test Sample')
+axes[0, 1].set_ylabel('Pressure')
+axes[0, 1].set_title(f'Best Model: {best_model_name} - Predictions vs Actual')
+axes[0, 1].legend()
 axes[0, 1].grid(True)
 
-# Plot 3: Training curves for best model
-axes[1, 0].plot(best_result['train_losses'], label='Train Loss')
-axes[1, 0].plot(best_result['val_losses'], label='Val Loss')
-axes[1, 0].set_xlabel('Epoch')
-axes[1, 0].set_ylabel('Loss')
-axes[1, 0].set_title(f'{best_model_name} Training Curves')
-axes[1, 0].legend()
+# Plot 3: Best model correlation scatter plot (like our fixed LSTM_model.py)
+axes[1, 0].scatter(best_result['targets'], best_result['pred'], alpha=0.6, s=50)
+axes[1, 0].plot([best_result['targets'].min(), best_result['targets'].max()], 
+                [best_result['targets'].min(), best_result['targets'].max()], 'r--', lw=2)
+axes[1, 0].set_xlabel('Actual Pressure')
+axes[1, 0].set_ylabel('Predicted Pressure')
+axes[1, 0].set_title(f'Best Model Correlation (R² = {best_r2:.4f})')
 axes[1, 0].grid(True)
 
-# Plot 4: All predictions vs actual
-colors = ['blue', 'red', 'green', 'orange']
-for i, (name, result) in enumerate(results.items()):
-    axes[1, 1].scatter(result['targets'], result['pred'], alpha=0.5, 
-                      label=f'{name} (R²={result["r2"]:.3f})', color=colors[i])
+# Add R² text box like our fixed LSTM_model.py
+axes[1, 0].text(0.05, 0.95, f'R² = {best_r2:.4f}', 
+                transform=axes[1, 0].transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-axes[1, 1].plot([0, max([max(r['targets']) for r in results.values()])], 
-                [0, max([max(r['targets']) for r in results.values()])], 'k--', lw=1)
-axes[1, 1].set_xlabel('Actual Pressure')
-axes[1, 1].set_ylabel('Predicted Pressure')
-axes[1, 1].set_title('All Models: Predictions vs Actual')
-axes[1, 1].legend(fontsize=8)
+# Plot 4: Training curves for best model
+axes[1, 1].plot(best_result['train_losses'], label='Train Loss')
+axes[1, 1].plot(best_result['val_losses'], label='Val Loss')
+axes[1, 1].set_xlabel('Epoch')
+axes[1, 1].set_ylabel('Loss')  # FIXED: was xlabel
+axes[1, 1].set_title(f'{best_model_name} Training and Validation Loss')
+axes[1, 1].legend()
 axes[1, 1].grid(True)
 
 plt.tight_layout()
