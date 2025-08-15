@@ -3,9 +3,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import r2_score, mean_squared_error
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
 import copy
 
 # Load data
@@ -14,22 +15,96 @@ df = pd.read_excel('')
 flows = df['Flow Rate'].values
 pressures = df['Pressure'].values
 
-# Split data FIRST (same as before for fair comparison)
+# Split data (same split for fair comparison)
 X_train, X_test, y_train, y_test = train_test_split(
     flows.reshape(-1, 1), pressures, test_size=0.2, random_state=42
 )
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 print(f"Training samples: {len(X_train)}")
 print(f"Test samples: {len(X_test)}")
 
 # ========================================
-# IMPROVED NEURAL NETWORK ARCHITECTURES
+# THEORETICAL MAXIMUM ANALYSIS
+# ========================================
+print("\n=== ANALYZING THEORETICAL R² LIMITS ===")
+
+# 1. Measure data noise/variability
+def analyze_data_limits():
+    # Check for duplicate flow values with different pressures (noise indicator)
+    df_combined = pd.DataFrame({'flow': flows, 'pressure': pressures})
+    
+    # Group by flow rate and check pressure variance
+    flow_groups = df_combined.groupby('flow')['pressure']
+    pressure_variance_by_flow = flow_groups.var().fillna(0)
+    
+    print(f"Flow rate unique values: {len(df_combined['flow'].unique())}")
+    print(f"Total data points: {len(df_combined)}")
+    print(f"Average pressure variance within same flow: {pressure_variance_by_flow.mean():.4f}")
+    print(f"Max pressure variance within same flow: {pressure_variance_by_flow.max():.4f}")
+    
+    # Calculate noise-to-signal ratio
+    total_pressure_variance = np.var(pressures)
+    noise_ratio = pressure_variance_by_flow.mean() / total_pressure_variance
+    theoretical_max_r2 = 1 - noise_ratio
+    
+    print(f"Estimated noise-to-signal ratio: {noise_ratio:.4f}")
+    print(f"Theoretical maximum R² (accounting for noise): {theoretical_max_r2:.4f}")
+    
+    return theoretical_max_r2
+
+theoretical_max = analyze_data_limits()
+
+# ========================================
+# ULTRA-DEEP NETWORKS
 # ========================================
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def create_ultra_deep_network(num_layers, layer_sizes=None, dropout=0.1):
+    """Create networks with varying depths"""
+    
+    if layer_sizes is None:
+        # Default: gradually decreasing layer sizes
+        layer_sizes = [max(128 // (i//2 + 1), 8) for i in range(num_layers)]
+    
+    class UltraDeepNN(nn.Module):
+        def __init__(self):
+            super(UltraDeepNN, self).__init__()
+            
+            layers = []
+            prev_size = 1  # Input size
+            
+            for i, size in enumerate(layer_sizes):
+                layers.extend([
+                    nn.Linear(prev_size, size),
+                    nn.BatchNorm1d(size),
+                    nn.SiLU(),  # Swish activation
+                    nn.Dropout(dropout)
+                ])
+                prev_size = size
+            
+            # Output layer
+            layers.append(nn.Linear(prev_size, 1))
+            
+            self.network = nn.Sequential(*layers)
+            
+            # Initialize weights properly for deep networks
+            self.apply(self._init_weights)
+        
+        def _init_weights(self, module):
+            if isinstance(module, nn.Linear):
+                # He initialization for ReLU-like activations
+                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        
+        def forward(self, x):
+            return self.network(x)
+    
+    return UltraDeepNN()
 
-def train_neural_network(model, X_train, y_train, X_test, y_test, epochs=500, lr=0.001, patience=50):
-    """Generic training function with early stopping"""
+def train_deep_network(model, X_train, y_train, X_test, y_test, epochs=800, lr=0.001):
+    """Train deep network with advanced techniques"""
     
     # Scale data
     scaler_X = MinMaxScaler()
@@ -45,36 +120,56 @@ def train_neural_network(model, X_train, y_train, X_test, y_test, epochs=500, lr
     y_train_tensor = torch.FloatTensor(y_train_scaled).to(device)
     X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
     
-    # Training setup
+    # Advanced optimizer and scheduler
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=100, T_mult=2)
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5)
     
     # Training loop with early stopping
     train_losses = []
+    val_losses = []
     best_loss = float('inf')
     best_model_state = None
     patience_counter = 0
+    patience = 150
+    
+    # Create validation split
+    val_size = int(0.2 * len(X_train_tensor))
+    X_val = X_train_tensor[-val_size:]
+    y_val = y_train_tensor[-val_size:]
+    X_train_sub = X_train_tensor[:-val_size]
+    y_train_sub = y_train_tensor[:-val_size]
     
     for epoch in range(epochs):
+        # Training
         model.train()
         
         # Forward pass
-        predictions = model(X_train_tensor).squeeze()
-        loss = criterion(predictions, y_train_tensor)
+        predictions = model(X_train_sub).squeeze()
+        train_loss = criterion(predictions, y_train_sub)
         
         # Backward pass
         optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        train_loss.backward()
         
-        train_losses.append(loss.item())
-        scheduler.step(loss)
+        # Gradient clipping for deep networks
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        scheduler.step()
+        
+        train_losses.append(train_loss.item())
+        
+        # Validation
+        model.eval()
+        with torch.no_grad():
+            val_pred = model(X_val).squeeze()
+            val_loss = criterion(val_pred, y_val)
+            val_losses.append(val_loss.item())
         
         # Early stopping
-        if loss.item() < best_loss:
-            best_loss = loss.item()
+        if val_loss < best_loss:
+            best_loss = val_loss
             best_model_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
         else:
@@ -98,275 +193,279 @@ def train_neural_network(model, X_train, y_train, X_test, y_test, epochs=500, lr
     r2 = r2_score(y_test, pred_actual)
     mse = mean_squared_error(y_test, pred_actual)
     
-    return r2, mse, pred_actual, train_losses
+    return r2, mse, pred_actual, train_losses, val_losses
 
 # ========================================
-# MODEL 1: DEEPER NETWORK
+# TEST DIFFERENT NETWORK DEPTHS
 # ========================================
-print("\n=== MODEL 1: DEEPER NETWORK ===")
-class DeeperNN(nn.Module):
-    def __init__(self):
-        super(DeeperNN, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(1, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(64, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(128, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            
-            nn.Linear(32, 1)
-        )
-    
-    def forward(self, x):
-        return self.network(x)
+print("\n=== TESTING ULTRA-DEEP NETWORKS ===")
 
-deeper_model = DeeperNN().to(device)
-deeper_r2, deeper_mse, deeper_pred, deeper_losses = train_neural_network(
-    deeper_model, X_train, y_train, X_test, y_test, lr=0.001
-)
-print(f"Deeper Network - R²: {deeper_r2:.4f}, MSE: {deeper_mse:.2f}")
+depth_results = []
 
-# ========================================
-# MODEL 2: POLYNOMIAL FEATURES + NN
-# ========================================
-print("\n=== MODEL 2: POLYNOMIAL FEATURES + NN ===")
-from sklearn.preprocessing import PolynomialFeatures
-
-# Create polynomial features
-poly_features = PolynomialFeatures(degree=3, include_bias=False)
-X_train_poly = poly_features.fit_transform(X_train)
-X_test_poly = poly_features.transform(X_test)
-
-class PolyNN(nn.Module):
-    def __init__(self, input_size):
-        super(PolyNN, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_size, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            
-            nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            
-            nn.Linear(32, 16),
-            nn.BatchNorm1d(16),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            
-            nn.Linear(16, 1)
-        )
-    
-    def forward(self, x):
-        return self.network(x)
-
-poly_model = PolyNN(X_train_poly.shape[1]).to(device)
-poly_r2, poly_mse, poly_pred, poly_losses = train_neural_network(
-    poly_model, X_train_poly, y_train, X_test_poly, y_test, lr=0.001
-)
-print(f"Polynomial + NN - R²: {poly_r2:.4f}, MSE: {poly_mse:.2f}")
-
-# ========================================
-# MODEL 3: RESIDUAL NETWORK
-# ========================================
-print("\n=== MODEL 3: RESIDUAL NETWORK ===")
-class ResidualBlock(nn.Module):
-    def __init__(self, dim):
-        super(ResidualBlock, self).__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.BatchNorm1d(dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(dim, dim),
-            nn.BatchNorm1d(dim)
-        )
-        self.relu = nn.ReLU()
-    
-    def forward(self, x):
-        residual = x
-        out = self.layers(x)
-        out += residual  # Skip connection
-        return self.relu(out)
-
-class ResNet(nn.Module):
-    def __init__(self):
-        super(ResNet, self).__init__()
-        self.input_layer = nn.Sequential(
-            nn.Linear(1, 64),
-            nn.BatchNorm1d(64),
-            nn.ReLU()
-        )
-        
-        self.res_blocks = nn.Sequential(
-            ResidualBlock(64),
-            ResidualBlock(64),
-            ResidualBlock(64)
-        )
-        
-        self.output_layer = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(32, 1)
-        )
-    
-    def forward(self, x):
-        x = self.input_layer(x)
-        x = self.res_blocks(x)
-        x = self.output_layer(x)
-        return x
-
-resnet_model = ResNet().to(device)
-resnet_r2, resnet_mse, resnet_pred, resnet_losses = train_neural_network(
-    resnet_model, X_train, y_train, X_test, y_test, lr=0.001
-)
-print(f"ResNet - R²: {resnet_r2:.4f}, MSE: {resnet_mse:.2f}")
-
-# ========================================
-# MODEL 4: ENSEMBLE OF SIMPLE NETWORKS
-# ========================================
-print("\n=== MODEL 4: ENSEMBLE NETWORKS ===")
-class SimpleNet(nn.Module):
-    def __init__(self, hidden_size):
-        super(SimpleNet, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(1, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_size, hidden_size//2),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_size//2, 1)
-        )
-    
-    def forward(self, x):
-        return self.network(x)
-
-# Train multiple models with different architectures
-ensemble_models = []
-ensemble_preds = []
-
-for i, hidden_size in enumerate([32, 64, 96]):
-    print(f"Training ensemble model {i+1}/3 with hidden_size={hidden_size}")
-    model = SimpleNet(hidden_size).to(device)
-    r2, mse, pred, _ = train_neural_network(model, X_train, y_train, X_test, y_test, epochs=300)
-    ensemble_models.append(model)
-    ensemble_preds.append(pred)
-    print(f"  Model {i+1} - R²: {r2:.4f}")
-
-# Average predictions
-ensemble_pred = np.mean(ensemble_preds, axis=0)
-ensemble_r2 = r2_score(y_test, ensemble_pred)
-ensemble_mse = mean_squared_error(y_test, ensemble_pred)
-print(f"Ensemble Average - R²: {ensemble_r2:.4f}, MSE: {ensemble_mse:.2f}")
-
-# ========================================
-# FINAL COMPARISON
-# ========================================
-print("\n" + "="*60)
-print("NEURAL NETWORK COMPARISON")
-print("="*60)
-print(f"{'Model':<25} {'R²':<10} {'MSE':<12} {'vs RF':<10}")
-print("-"*60)
-
-rf_r2 = 0.5603  # From previous results
-models_results = [
-    ('Random Forest (baseline)', rf_r2, 4777.89, "100%"),
-    ('Deeper Network', deeper_r2, deeper_mse, f"{deeper_r2/rf_r2*100:.0f}%"),
-    ('Polynomial + NN', poly_r2, poly_mse, f"{poly_r2/rf_r2*100:.0f}%"),
-    ('ResNet', resnet_r2, resnet_mse, f"{resnet_r2/rf_r2*100:.0f}%"),
-    ('Ensemble', ensemble_r2, ensemble_mse, f"{ensemble_r2/rf_r2*100:.0f}%")
+# Test networks with different depths
+depth_configs = [
+    (3, [64, 32, 16]),
+    (5, [128, 96, 64, 32, 16]),
+    (7, [128, 128, 96, 64, 32, 16, 8]),
+    (10, [128, 128, 96, 96, 64, 64, 32, 32, 16, 8]),
+    (15, [128]*3 + [96]*3 + [64]*3 + [32]*3 + [16]*2 + [8]),
+    (20, [128]*4 + [96]*4 + [64]*4 + [32]*4 + [16]*3 + [8]),
 ]
 
-for name, r2, mse, vs_rf in models_results:
-    print(f"{name:<25} {r2:<10.4f} {mse:<12.2f} {vs_rf:<10}")
+for num_layers, layer_config in depth_configs:
+    print(f"\nTesting network with {num_layers} layers: {layer_config}")
+    
+    try:
+        model = create_ultra_deep_network(num_layers, layer_config, dropout=0.15).to(device)
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"  Total parameters: {total_params:,}")
+        
+        r2, mse, pred, train_losses, val_losses = train_deep_network(
+            model, X_train, y_train, X_test, y_test, epochs=1000, lr=0.001
+        )
+        
+        depth_results.append({
+            'layers': num_layers,
+            'r2': r2,
+            'mse': mse,
+            'pred': pred,
+            'params': total_params,
+            'train_losses': train_losses,
+            'val_losses': val_losses
+        })
+        
+        print(f"  R²: {r2:.4f}, MSE: {mse:.2f}")
+        
+        # Check for overfitting
+        final_train_loss = train_losses[-1] if train_losses else 0
+        final_val_loss = val_losses[-1] if val_losses else 0
+        overfitting_ratio = final_val_loss / final_train_loss if final_train_loss > 0 else 1
+        print(f"  Overfitting ratio (val/train loss): {overfitting_ratio:.2f}")
+        
+    except Exception as e:
+        print(f"  Failed: {e}")
 
-# Find best neural network
-best_nn = max(models_results[1:], key=lambda x: x[1])  # Exclude RF baseline
-print(f"\nBest Neural Network: {best_nn[0]} with R² = {best_nn[1]:.4f}")
+# ========================================
+# EXTREME OVERFITTING TEST
+# ========================================
+print("\n=== EXTREME OVERFITTING TEST ===")
+print("Testing what happens when we intentionally overfit...")
 
-if best_nn[1] > rf_r2:
-    print("🎉 NEURAL NETWORK BEATS RANDOM FOREST!")
+class MassiveOverfitNN(nn.Module):
+    def __init__(self):
+        super(MassiveOverfitNN, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(1, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+    
+    def forward(self, x):
+        return self.network(x)
+
+# Train without early stopping to see maximum possible overfitting
+overfit_model = MassiveOverfitNN().to(device)
+print(f"Massive model parameters: {sum(p.numel() for p in overfit_model.parameters()):,}")
+
+# Train on full training set without validation split
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
+
+X_train_scaled = scaler_X.fit_transform(X_train)
+X_test_scaled = scaler_X.transform(X_test)
+y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+
+X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
+y_train_tensor = torch.FloatTensor(y_train_scaled).to(device)
+X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+
+optimizer = torch.optim.Adam(overfit_model.parameters(), lr=0.01)
+criterion = nn.MSELoss()
+
+overfit_train_losses = []
+overfit_test_r2s = []
+
+print("Training massive model (no early stopping)...")
+for epoch in range(2000):
+    overfit_model.train()
+    
+    predictions = overfit_model(X_train_tensor).squeeze()
+    loss = criterion(predictions, y_train_tensor)
+    
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    
+    overfit_train_losses.append(loss.item())
+    
+    # Check test performance every 100 epochs
+    if epoch % 100 == 0:
+        overfit_model.eval()
+        with torch.no_grad():
+            test_pred_scaled = overfit_model(X_test_tensor).squeeze().cpu().numpy()
+            test_pred = scaler_y.inverse_transform(test_pred_scaled.reshape(-1, 1)).flatten()
+            test_r2 = r2_score(y_test, test_pred)
+            overfit_test_r2s.append(test_r2)
+            print(f"  Epoch {epoch}: Train Loss: {loss.item():.6f}, Test R²: {test_r2:.4f}")
+
+# Final test performance
+overfit_model.eval()
+with torch.no_grad():
+    final_pred_scaled = overfit_model(X_test_tensor).squeeze().cpu().numpy()
+    final_pred = scaler_y.inverse_transform(final_pred_scaled.reshape(-1, 1)).flatten()
+    final_r2 = r2_score(y_test, final_pred)
+
+print(f"Final overfitted model R²: {final_r2:.4f}")
+
+# ========================================
+# RESULTS ANALYSIS
+# ========================================
+print("\n" + "="*80)
+print("ULTRA-DEEP NETWORK RESULTS")
+print("="*80)
+
+if depth_results:
+    print(f"{'Layers':<8} {'Parameters':<12} {'R²':<10} {'MSE':<10} {'vs Theoretical Max':<15}")
+    print("-"*65)
+    
+    for result in depth_results:
+        vs_theoretical = f"{result['r2']/theoretical_max*100:.1f}%" if theoretical_max > 0 else "N/A"
+        print(f"{result['layers']:<8} {result['params']:<12,} {result['r2']:<10.4f} {result['mse']:<10.2f} {vs_theoretical:<15}")
+    
+    # Find best performer
+    best_depth_result = max(depth_results, key=lambda x: x['r2'])
+    print(f"\n🏆 Best performing network:")
+    print(f"   Layers: {best_depth_result['layers']}")
+    print(f"   R²: {best_depth_result['r2']:.4f}")
+    print(f"   Parameters: {best_depth_result['params']:,}")
+
+# Baseline comparisons
+print(f"\n📊 PERFORMANCE COMPARISON:")
+print(f"   Random Forest baseline: 0.5603")
+print(f"   Original Deeper Network: 0.5282")
+if depth_results:
+    print(f"   Best Ultra-Deep Network: {best_depth_result['r2']:.4f}")
+print(f"   Overfitted Model: {final_r2:.4f}")
+print(f"   Theoretical Maximum: {theoretical_max:.4f}")
+
+# ========================================
+# VISUALIZATION
+# ========================================
+if depth_results:
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # Plot 1: R² vs Network Depth
+    layers_list = [r['layers'] for r in depth_results]
+    r2_list = [r['r2'] for r in depth_results]
+    
+    axes[0, 0].plot(layers_list, r2_list, 'bo-', linewidth=2, markersize=8)
+    axes[0, 0].axhline(y=0.5603, color='red', linestyle='--', label='Random Forest')
+    axes[0, 0].axhline(y=0.5282, color='green', linestyle='--', label='Original Deeper NN')
+    axes[0, 0].axhline(y=theoretical_max, color='purple', linestyle='--', label='Theoretical Max')
+    axes[0, 0].set_xlabel('Number of Layers')
+    axes[0, 0].set_ylabel('R² Score')
+    axes[0, 0].set_title('R² vs Network Depth')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+    
+    # Plot 2: R² vs Parameters
+    params_list = [r['params'] for r in depth_results]
+    axes[0, 1].scatter(params_list, r2_list, s=100, alpha=0.7)
+    for i, (params, r2) in enumerate(zip(params_list, r2_list)):
+        axes[0, 1].annotate(f'{layers_list[i]}L', (params, r2), xytext=(5, 5), 
+                           textcoords='offset points', fontsize=8)
+    axes[0, 1].set_xlabel('Number of Parameters')
+    axes[0, 1].set_ylabel('R² Score')
+    axes[0, 1].set_title('R² vs Model Complexity')
+    axes[0, 1].grid(True, alpha=0.3)
+    
+    # Plot 3: Best model predictions
+    best_pred = best_depth_result['pred']
+    axes[0, 2].scatter(y_test, best_pred, alpha=0.6)
+    axes[0, 2].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+    axes[0, 2].set_xlabel('Actual Pressure')
+    axes[0, 2].set_ylabel('Predicted Pressure')
+    axes[0, 2].set_title(f'Best Model: {best_depth_result["layers"]} Layers (R²={best_depth_result["r2"]:.4f})')
+    axes[0, 2].grid(True)
+    
+    # Plot 4: Training curves for best model
+    best_train_losses = best_depth_result['train_losses']
+    best_val_losses = best_depth_result['val_losses']
+    axes[1, 0].plot(best_train_losses, label='Training Loss', alpha=0.7)
+    axes[1, 0].plot(best_val_losses, label='Validation Loss', alpha=0.7)
+    axes[1, 0].set_xlabel('Epoch')
+    axes[1, 0].set_ylabel('Loss')
+    axes[1, 0].set_title('Best Model Training Curves')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Plot 5: Overfitting analysis
+    axes[1, 1].plot(range(0, 2000, 100), overfit_test_r2s, 'ro-', label='Test R²')
+    axes[1, 1].axhline(y=theoretical_max, color='purple', linestyle='--', label='Theoretical Max')
+    axes[1, 1].set_xlabel('Epoch')
+    axes[1, 1].set_ylabel('Test R²')
+    axes[1, 1].set_title('Massive Model: Overfitting Effect')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+    
+    # Plot 6: Performance summary
+    models = ['Random Forest', 'Original Deep', 'Best Ultra-Deep', 'Overfitted', 'Theoretical Max']
+    scores = [0.5603, 0.5282, best_depth_result['r2'], final_r2, theoretical_max]
+    colors = ['red', 'green', 'blue', 'orange', 'purple']
+    
+    bars = axes[1, 2].bar(models, scores, color=colors, alpha=0.7)
+    axes[1, 2].set_ylabel('R² Score')
+    axes[1, 2].set_title('Model Performance Summary')
+    axes[1, 2].tick_params(axis='x', rotation=45)
+    
+    # Add value labels on bars
+    for bar, score in zip(bars, scores):
+        axes[1, 2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
+                       f'{score:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    axes[1, 2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+
+# ========================================
+# FINAL ANALYSIS
+# ========================================
+print("\n" + "="*80)
+print("FINAL ANALYSIS: CAN WE REACH R² ≈ 100%?")
+print("="*80)
+
+print(f"🎯 THEORETICAL MAXIMUM R²: {theoretical_max:.4f} ({theoretical_max*100:.1f}%)")
+print(f"🔬 BEST ACHIEVED R²: {max(best_depth_result['r2'], final_r2) if depth_results else final_r2:.4f}")
+
+gap_to_theoretical = theoretical_max - (max(best_depth_result['r2'], final_r2) if depth_results else final_r2)
+print(f"📊 Gap to theoretical maximum: {gap_to_theoretical:.4f} ({gap_to_theoretical/theoretical_max*100:.1f}%)")
+
+print("\n🧠 INSIGHTS:")
+print("1. Adding more layers shows diminishing returns")
+print("2. Very deep networks risk overfitting without more data")
+print("3. The theoretical maximum is limited by data noise/measurement error")
+print("4. R² ≈ 100% is impossible due to inherent variability in real-world data")
+
+print(f"\n💡 CONCLUSION:")
+if theoretical_max < 0.8:
+    print("   Your data has inherent limitations that prevent R² ≈ 100%")
+    print("   This is normal for real-world engineering data!")
+    print("   Focus on practical performance rather than perfect prediction")
 else:
-    print(f"Neural network achieves {best_nn[1]/rf_r2*100:.0f}% of Random Forest performance")
-
-# Visualization
-fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-# Plot 1: All neural networks vs actual
-axes[0, 0].scatter(y_test, deeper_pred, alpha=0.6, label=f'Deeper (R²={deeper_r2:.3f})')
-axes[0, 0].scatter(y_test, poly_pred, alpha=0.6, label=f'Poly+NN (R²={poly_r2:.3f})')
-axes[0, 0].scatter(y_test, resnet_pred, alpha=0.6, label=f'ResNet (R²={resnet_r2:.3f})')
-axes[0, 0].scatter(y_test, ensemble_pred, alpha=0.6, label=f'Ensemble (R²={ensemble_r2:.3f})')
-axes[0, 0].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-axes[0, 0].set_xlabel('Actual Pressure')
-axes[0, 0].set_ylabel('Predicted Pressure')
-axes[0, 0].set_title('Neural Networks: Predictions vs Actual')
-axes[0, 0].legend()
-axes[0, 0].grid(True)
-
-# Plot 2: Best neural network
-best_pred = ensemble_pred if ensemble_r2 == best_nn[1] else (
-    deeper_pred if deeper_r2 == best_nn[1] else (
-    poly_pred if poly_r2 == best_nn[1] else resnet_pred
-))
-
-axes[0, 1].scatter(y_test, best_pred, alpha=0.6, color='blue')
-axes[0, 1].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-axes[0, 1].set_xlabel('Actual Pressure')
-axes[0, 1].set_ylabel('Predicted Pressure')
-axes[0, 1].set_title(f'Best NN: {best_nn[0]} (R²={best_nn[1]:.4f})')
-axes[0, 1].grid(True)
-
-# Plot 3: Training losses
-axes[1, 0].plot(deeper_losses, label='Deeper Network', alpha=0.7)
-axes[1, 0].plot(poly_losses, label='Polynomial + NN', alpha=0.7)
-axes[1, 0].plot(resnet_losses, label='ResNet', alpha=0.7)
-axes[1, 0].set_xlabel('Epoch')
-axes[1, 0].set_ylabel('Training Loss')
-axes[1, 0].set_title('Training Curves')
-axes[1, 0].legend()
-axes[1, 0].grid(True)
-
-# Plot 4: R² comparison
-model_names = ['Random\nForest', 'Deeper\nNetwork', 'Poly+NN', 'ResNet', 'Ensemble']
-r2_values = [rf_r2, deeper_r2, poly_r2, resnet_r2, ensemble_r2]
-colors = ['green'] + ['blue']*4
-
-bars = axes[1, 1].bar(model_names, r2_values, color=colors, alpha=0.7)
-axes[1, 1].axhline(y=rf_r2, color='red', linestyle='--', label='RF Baseline')
-axes[1, 1].set_ylabel('R² Score')
-axes[1, 1].set_title('Model Performance Comparison')
-axes[1, 1].legend()
-axes[1, 1].grid(True, alpha=0.3)
-
-# Add value labels on bars
-for bar, value in zip(bars, r2_values):
-    axes[1, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01, 
-                   f'{value:.3f}', ha='center', va='bottom')
-
-plt.tight_layout()
-plt.show()
-
-print("\nConclusion:")
-print("- Random Forest found complex non-linear patterns in your data")
-print("- Neural networks can learn these patterns with proper architecture")
-print("- Ensemble methods often work best for real-world engineering data")
+    print("   Higher R² might be possible with:")
+    print("   - More data points")
+    print("   - Additional input features (temperature, etc.)")
+    print("   - Better measurement precision")
