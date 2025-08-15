@@ -9,14 +9,14 @@ from torchvision.models import inception_v3
 from scipy.stats import pearsonr
 
 
-# Basic settings
+# Basic settings - Reduced complexity to prevent overfitting
 SEQ_LENGTH = 20  
 PRED_LENGTH = 5  
-HIDDEN_SIZE = 128
-DENSE_SIZE = 128 
+HIDDEN_SIZE = 64    # Reduced from 128
+DENSE_SIZE = 64     # Reduced from 128
 BATCH_SIZE = 170
-LEARNING_RATE = 5e-4
-EPOCHS = 3000
+LEARNING_RATE = 5e-4  # Keep original learning rate
+EPOCHS = 1000       # Reduced from 3000, early stopping will handle this
 
 
 # Check if GPU is available
@@ -103,8 +103,7 @@ class Model(nn.Module):
         predictions = self.dense2(x)
         return predictions
     
-model = Model().to(device)
-
+model = Model(dropout=0.3).to(device)
 
 # loss function (MSE) and optimizer (Adam)
 MSE = nn.MSELoss()
