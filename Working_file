@@ -1,23 +1,3 @@
-# Define Model with Dropout for Regularization
-class Model(nn.Module):
-    def __init__(self, dropout=0.3):
-        super(Model, self).__init__()
-
-        # LSTM layer
-        self.lstm = nn.LSTM(input_size=2, hidden_size=HIDDEN_SIZE, batch_first=True)
-
-        # Dense layers with dropout
-        self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE)
-        self.relu = nn.ReLU()
-        self.dropout1 = nn.Dropout(dropout)
-        self.dense2 = nn.Linear(DENSE_SIZE, PRED_LENGTH)
-
-    def forward(self, x):
-        lstm_out, (hidden, cell) = self.lstm(x)
-        last_hidden = hidden[-1]
-        
-        x = self.dense1(last_hidden)
-        x = self.relu(x)
-        x = self.dropout1(x)
-        predictions = self.dense2(x)
-        return predictions
+from sklearn.metrics import r2_score
+r2_sklearn = r2_score(targets_flat, predictions_flat)
+print(f"Sklearn R²: {r2_sklearn}")
