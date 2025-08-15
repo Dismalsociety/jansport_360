@@ -1,13 +1,22 @@
-import pandas as pd
-import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import r2_score, mean_squared_error
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score
 import copy
+
+# Basic settings
+HIDDEN_SIZES = [128, 96, 64, 32]  # Deep network layer sizes
+BATCH_SIZE = 32                   # Smaller batch size for better training
+LEARNING_RATE = 1e-3
+EPOCHS = 1000
+DROPOUT = 0.2
+
+# Check if GPU is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
 # Load data
 print("Loading data...")
@@ -15,457 +24,230 @@ df = pd.read_excel('')
 flows = df['Flow Rate'].values
 pressures = df['Pressure'].values
 
-# Split data (same split for fair comparison)
-X_train, X_test, y_train, y_test = train_test_split(
-    flows.reshape(-1, 1), pressures, test_size=0.2, random_state=42
-)
+print(f"Data points: {len(flows)}")
+print(f"Flow range: {flows.min():.2f} to {flows.max():.2f}")
+print(f"Pressure range: {pressures.min():.2f} to {pressures.max():.2f}")
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+# Separate normalization for better convergence
+scaler_flow = MinMaxScaler(feature_range=(-1, 1))
+scaler_pressure = MinMaxScaler(feature_range=(-1, 1))
+
+flows_normalized = scaler_flow.fit_transform(flows.reshape(-1, 1)).flatten()
+pressures_normalized = scaler_pressure.fit_transform(pressures.reshape(-1, 1)).flatten()
+
+print(f"Normalized flow range: {flows_normalized.min():.3f} to {flows_normalized.max():.3f}")
+print(f"Normalized pressure range: {pressures_normalized.min():.3f} to {pressures_normalized.max():.3f}")
+
+# Simple direct mapping: flow -> pressure (no sequences)
+print("Preparing data...")
+X_data = flows_normalized.reshape(-1, 1)  # Each flow value as input
+Y_data = pressures_normalized             # Corresponding pressure as target
+
+print(f"Input shape: {X_data.shape}")
+print(f"Target shape: {Y_data.shape}")
+
+# Proper data splitting with shuffling
+print("Splitting data...")
+indices = np.random.permutation(len(X_data))
+X_data_shuffled = X_data[indices]
+Y_data_shuffled = Y_data[indices]
+
+# Split into train and test 
+split = int(.8 * len(X_data_shuffled))
+X_train = torch.FloatTensor(X_data_shuffled[:split])
+Y_train = torch.FloatTensor(Y_data_shuffled[:split])
+X_test = torch.FloatTensor(X_data_shuffled[split:])
+Y_test = torch.FloatTensor(Y_data_shuffled[split:])
+
 print(f"Training samples: {len(X_train)}")
 print(f"Test samples: {len(X_test)}")
 
-# ========================================
-# THEORETICAL MAXIMUM ANALYSIS
-# ========================================
-print("\n=== ANALYZING THEORETICAL R² LIMITS ===")
-
-# 1. Measure data noise/variability
-def analyze_data_limits():
-    # Check for duplicate flow values with different pressures (noise indicator)
-    df_combined = pd.DataFrame({'flow': flows, 'pressure': pressures})
-    
-    # Group by flow rate and check pressure variance
-    flow_groups = df_combined.groupby('flow')['pressure']
-    pressure_variance_by_flow = flow_groups.var().fillna(0)
-    
-    print(f"Flow rate unique values: {len(df_combined['flow'].unique())}")
-    print(f"Total data points: {len(df_combined)}")
-    print(f"Average pressure variance within same flow: {pressure_variance_by_flow.mean():.4f}")
-    print(f"Max pressure variance within same flow: {pressure_variance_by_flow.max():.4f}")
-    
-    # Calculate noise-to-signal ratio
-    total_pressure_variance = np.var(pressures)
-    noise_ratio = pressure_variance_by_flow.mean() / total_pressure_variance
-    theoretical_max_r2 = 1 - noise_ratio
-    
-    print(f"Estimated noise-to-signal ratio: {noise_ratio:.4f}")
-    print(f"Theoretical maximum R² (accounting for noise): {theoretical_max_r2:.4f}")
-    
-    return theoretical_max_r2
-
-theoretical_max = analyze_data_limits()
-
-# ========================================
-# ULTRA-DEEP NETWORKS
-# ========================================
-
-def create_ultra_deep_network(num_layers, layer_sizes=None, dropout=0.1):
-    """Create networks with varying depths"""
-    
-    if layer_sizes is None:
-        # Default: gradually decreasing layer sizes
-        layer_sizes = [max(128 // (i//2 + 1), 8) for i in range(num_layers)]
-    
-    class UltraDeepNN(nn.Module):
-        def __init__(self):
-            super(UltraDeepNN, self).__init__()
-            
-            layers = []
-            prev_size = 1  # Input size
-            
-            for i, size in enumerate(layer_sizes):
-                layers.extend([
-                    nn.Linear(prev_size, size),
-                    nn.BatchNorm1d(size),
-                    nn.SiLU(),  # Swish activation
-                    nn.Dropout(dropout)
-                ])
-                prev_size = size
-            
-            # Output layer
-            layers.append(nn.Linear(prev_size, 1))
-            
-            self.network = nn.Sequential(*layers)
-            
-            # Initialize weights properly for deep networks
-            self.apply(self._init_weights)
+# Define Deep Neural Network Model
+class DeepNN(nn.Module):
+    def __init__(self, hidden_sizes=HIDDEN_SIZES, dropout=DROPOUT):
+        super(DeepNN, self).__init__()
         
-        def _init_weights(self, module):
-            if isinstance(module, nn.Linear):
-                # He initialization for ReLU-like activations
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
+        layers = []
+        input_size = 1  # Single flow input
         
-        def forward(self, x):
-            return self.network(x)
-    
-    return UltraDeepNN()
-
-def train_deep_network(model, X_train, y_train, X_test, y_test, epochs=800, lr=0.001):
-    """Train deep network with advanced techniques"""
-    
-    # Scale data
-    scaler_X = MinMaxScaler()
-    scaler_y = MinMaxScaler()
-    
-    X_train_scaled = scaler_X.fit_transform(X_train)
-    X_test_scaled = scaler_X.transform(X_test)
-    y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
-    y_test_scaled = scaler_y.transform(y_test.reshape(-1, 1)).flatten()
-    
-    # Convert to tensors
-    X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
-    y_train_tensor = torch.FloatTensor(y_train_scaled).to(device)
-    X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
-    
-    # Advanced optimizer and scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=100, T_mult=2)
-    criterion = nn.MSELoss()
-    
-    # Training loop with early stopping
-    train_losses = []
-    val_losses = []
-    best_loss = float('inf')
-    best_model_state = None
-    patience_counter = 0
-    patience = 150
-    
-    # Create validation split
-    val_size = int(0.2 * len(X_train_tensor))
-    X_val = X_train_tensor[-val_size:]
-    y_val = y_train_tensor[-val_size:]
-    X_train_sub = X_train_tensor[:-val_size]
-    y_train_sub = y_train_tensor[:-val_size]
-    
-    for epoch in range(epochs):
-        # Training
-        model.train()
+        # Create deep network layers
+        for hidden_size in hidden_sizes:
+            layers.extend([
+                nn.Linear(input_size, hidden_size),
+                nn.BatchNorm1d(hidden_size),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            input_size = hidden_size
         
-        # Forward pass
-        predictions = model(X_train_sub).squeeze()
-        train_loss = criterion(predictions, y_train_sub)
+        # Output layer
+        layers.append(nn.Linear(input_size, 1))
         
-        # Backward pass
-        optimizer.zero_grad()
-        train_loss.backward()
-        
-        # Gradient clipping for deep networks
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
-        optimizer.step()
-        scheduler.step()
-        
-        train_losses.append(train_loss.item())
-        
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(X_val).squeeze()
-            val_loss = criterion(val_pred, y_val)
-            val_losses.append(val_loss.item())
-        
-        # Early stopping
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best_model_state = copy.deepcopy(model.state_dict())
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        
-        if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch+1}")
-            break
-    
-    # Restore best model
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-    
-    # Test the model
-    model.eval()
-    with torch.no_grad():
-        pred_scaled = model(X_test_tensor).squeeze().cpu().numpy()
-    
-    # Denormalize predictions
-    pred_actual = scaler_y.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
-    r2 = r2_score(y_test, pred_actual)
-    mse = mean_squared_error(y_test, pred_actual)
-    
-    return r2, mse, pred_actual, train_losses, val_losses
-
-# ========================================
-# TEST DIFFERENT NETWORK DEPTHS
-# ========================================
-print("\n=== TESTING ULTRA-DEEP NETWORKS ===")
-
-depth_results = []
-
-# Test networks with different depths
-depth_configs = [
-    (3, [64, 32, 16]),
-    (5, [128, 96, 64, 32, 16]),
-    (7, [128, 128, 96, 64, 32, 16, 8]),
-    (10, [128, 128, 96, 96, 64, 64, 32, 32, 16, 8]),
-    (15, [128]*3 + [96]*3 + [64]*3 + [32]*3 + [16]*2 + [8]),
-    (20, [128]*4 + [96]*4 + [64]*4 + [32]*4 + [16]*3 + [8]),
-]
-
-for num_layers, layer_config in depth_configs:
-    print(f"\nTesting network with {num_layers} layers: {layer_config}")
-    
-    try:
-        model = create_ultra_deep_network(num_layers, layer_config, dropout=0.15).to(device)
-        
-        # Count parameters
-        total_params = sum(p.numel() for p in model.parameters())
-        print(f"  Total parameters: {total_params:,}")
-        
-        r2, mse, pred, train_losses, val_losses = train_deep_network(
-            model, X_train, y_train, X_test, y_test, epochs=1000, lr=0.001
-        )
-        
-        depth_results.append({
-            'layers': num_layers,
-            'r2': r2,
-            'mse': mse,
-            'pred': pred,
-            'params': total_params,
-            'train_losses': train_losses,
-            'val_losses': val_losses
-        })
-        
-        print(f"  R²: {r2:.4f}, MSE: {mse:.2f}")
-        
-        # Check for overfitting
-        final_train_loss = train_losses[-1] if train_losses else 0
-        final_val_loss = val_losses[-1] if val_losses else 0
-        overfitting_ratio = final_val_loss / final_train_loss if final_train_loss > 0 else 1
-        print(f"  Overfitting ratio (val/train loss): {overfitting_ratio:.2f}")
-        
-    except Exception as e:
-        print(f"  Failed: {e}")
-
-# ========================================
-# EXTREME OVERFITTING TEST
-# ========================================
-print("\n=== EXTREME OVERFITTING TEST ===")
-print("Testing what happens when we intentionally overfit...")
-
-class MassiveOverfitNN(nn.Module):
-    def __init__(self):
-        super(MassiveOverfitNN, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(1, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1)
-        )
+        self.network = nn.Sequential(*layers)
     
     def forward(self, x):
         return self.network(x)
 
-# Train without early stopping to see maximum possible overfitting
-overfit_model = MassiveOverfitNN().to(device)
-print(f"Massive model parameters: {sum(p.numel() for p in overfit_model.parameters()):,}")
+model = DeepNN().to(device)
 
-# Train on full training set without validation split
-scaler_X = MinMaxScaler()
-scaler_y = MinMaxScaler()
+# Count and display model parameters
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Model parameters: {total_params:,}")
 
-X_train_scaled = scaler_X.fit_transform(X_train)
-X_test_scaled = scaler_X.transform(X_test)
-y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()
+# Loss function and optimizer
+MSE = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
 
-X_train_tensor = torch.FloatTensor(X_train_scaled).to(device)
-y_train_tensor = torch.FloatTensor(y_train_scaled).to(device)
-X_test_tensor = torch.FloatTensor(X_test_scaled).to(device)
+# Training with early stopping
+print("\nStarting Training...")
+train_losses = []
+val_losses = []
 
-optimizer = torch.optim.Adam(overfit_model.parameters(), lr=0.01)
-criterion = nn.MSELoss()
+# Create validation set from last 20% of training data
+val_split = int(0.8 * len(X_train))
+X_train_sub = X_train[:val_split]
+Y_train_sub = Y_train[:val_split]
+X_val = X_train[val_split:]
+Y_val = Y_train[val_split:]
 
-overfit_train_losses = []
-overfit_test_r2s = []
+print(f"Training subset: {len(X_train_sub)} samples")
+print(f"Validation subset: {len(X_val)} samples")
 
-print("Training massive model (no early stopping)...")
-for epoch in range(2000):
-    overfit_model.train()
+# Early stopping parameters
+best_val_loss = float('inf')
+patience = 100  # Increased patience for better training
+patience_counter = 0
+best_model_state = None
+
+for epoch in range(EPOCHS):
+    total_loss = 0
+    num_batches = 0
+
+    # Set model to training mode
+    model.train()
     
-    predictions = overfit_model(X_train_tensor).squeeze()
-    loss = criterion(predictions, y_train_tensor)
-    
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    overfit_train_losses.append(loss.item())
-    
-    # Check test performance every 100 epochs
-    if epoch % 100 == 0:
-        overfit_model.eval()
-        with torch.no_grad():
-            test_pred_scaled = overfit_model(X_test_tensor).squeeze().cpu().numpy()
-            test_pred = scaler_y.inverse_transform(test_pred_scaled.reshape(-1, 1)).flatten()
-            test_r2 = r2_score(y_test, test_pred)
-            overfit_test_r2s.append(test_r2)
-            print(f"  Epoch {epoch}: Train Loss: {loss.item():.6f}, Test R²: {test_r2:.4f}")
+    # Train on batches using ONLY the training subset
+    for i in range(0, len(X_train_sub), BATCH_SIZE):
+        # Get batch from training subset only
+        batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
+        batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
 
-# Final test performance
-overfit_model.eval()
+        # Forward pass
+        predictions = model(batch_X).squeeze()
+        loss = MSE(predictions, batch_Y)
+
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # Gradient clipping for stable training
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+
+        total_loss += loss.item()
+        num_batches += 1
+
+    # Average loss
+    avg_loss = total_loss / num_batches
+    train_losses.append(avg_loss)
+
+    # Validation loss
+    model.eval()
+    with torch.no_grad():
+        val_outputs = model(X_val.to(device)).squeeze()
+        val_loss = MSE(val_outputs, Y_val.to(device))
+        val_losses.append(val_loss.item())
+    
+    # Early stopping check
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        patience_counter = 0
+        best_model_state = copy.deepcopy(model.state_dict())
+    else:
+        patience_counter += 1
+    
+    if patience_counter >= patience:
+        print(f"Early stopping at epoch {epoch+1}")
+        break
+
+    if (epoch + 1) % 20 == 0:
+        print(f'Epoch {epoch+1}/{EPOCHS}, Train Loss: {avg_loss:.4f}, Val Loss: {val_loss:.4f}, Patience: {patience_counter}/{patience}')
+
+# Restore best model
+if best_model_state is not None:
+    model.load_state_dict(best_model_state)
+    print(f"Restored best model with validation loss: {best_val_loss:.4f}")
+
+# Testing
+print("\nTesting model...")
+model.eval()
+
+# Predictions on test set
 with torch.no_grad():
-    final_pred_scaled = overfit_model(X_test_tensor).squeeze().cpu().numpy()
-    final_pred = scaler_y.inverse_transform(final_pred_scaled.reshape(-1, 1)).flatten()
-    final_r2 = r2_score(y_test, final_pred)
+    test_predictions = model(X_test.to(device)).squeeze().cpu().numpy()
+    test_targets = Y_test.cpu().numpy()
 
-print(f"Final overfitted model R²: {final_r2:.4f}")
+# Convert values back to original scale using correct scalers
+predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
+targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
 
-# ========================================
-# RESULTS ANALYSIS
-# ========================================
-print("\n" + "="*80)
-print("ULTRA-DEEP NETWORK RESULTS")
-print("="*80)
+# Calculate performance metrics
+r2 = r2_score(targets_actual, predictions_actual)
+mse = np.mean((targets_actual - predictions_actual) ** 2)
+mae = np.mean(np.abs(targets_actual - predictions_actual))
 
-if depth_results:
-    print(f"{'Layers':<8} {'Parameters':<12} {'R²':<10} {'MSE':<10} {'vs Theoretical Max':<15}")
-    print("-"*65)
-    
-    for result in depth_results:
-        vs_theoretical = f"{result['r2']/theoretical_max*100:.1f}%" if theoretical_max > 0 else "N/A"
-        print(f"{result['layers']:<8} {result['params']:<12,} {result['r2']:<10.4f} {result['mse']:<10.2f} {vs_theoretical:<15}")
-    
-    # Find best performer
-    best_depth_result = max(depth_results, key=lambda x: x['r2'])
-    print(f"\n🏆 Best performing network:")
-    print(f"   Layers: {best_depth_result['layers']}")
-    print(f"   R²: {best_depth_result['r2']:.4f}")
-    print(f"   Parameters: {best_depth_result['params']:,}")
+print(f"R²: {r2:.4f}")
+print(f"MSE: {mse:.2f}")
+print(f"MAE: {mae:.2f}")
 
-# Baseline comparisons
-print(f"\n📊 PERFORMANCE COMPARISON:")
-print(f"   Random Forest baseline: 0.5603")
-print(f"   Original Deeper Network: 0.5282")
-if depth_results:
-    print(f"   Best Ultra-Deep Network: {best_depth_result['r2']:.4f}")
-print(f"   Overfitted Model: {final_r2:.4f}")
-print(f"   Theoretical Maximum: {theoretical_max:.4f}")
+# Additional debug information
+print(f"\nPredictions range: {predictions_actual.min():.2f} to {predictions_actual.max():.2f}")
+print(f"Targets range: {targets_actual.min():.2f} to {targets_actual.max():.2f}")
 
-# ========================================
-# VISUALIZATION
-# ========================================
-if depth_results:
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    
-    # Plot 1: R² vs Network Depth
-    layers_list = [r['layers'] for r in depth_results]
-    r2_list = [r['r2'] for r in depth_results]
-    
-    axes[0, 0].plot(layers_list, r2_list, 'bo-', linewidth=2, markersize=8)
-    axes[0, 0].axhline(y=0.5603, color='red', linestyle='--', label='Random Forest')
-    axes[0, 0].axhline(y=0.5282, color='green', linestyle='--', label='Original Deeper NN')
-    axes[0, 0].axhline(y=theoretical_max, color='purple', linestyle='--', label='Theoretical Max')
-    axes[0, 0].set_xlabel('Number of Layers')
-    axes[0, 0].set_ylabel('R² Score')
-    axes[0, 0].set_title('R² vs Network Depth')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # Plot 2: R² vs Parameters
-    params_list = [r['params'] for r in depth_results]
-    axes[0, 1].scatter(params_list, r2_list, s=100, alpha=0.7)
-    for i, (params, r2) in enumerate(zip(params_list, r2_list)):
-        axes[0, 1].annotate(f'{layers_list[i]}L', (params, r2), xytext=(5, 5), 
-                           textcoords='offset points', fontsize=8)
-    axes[0, 1].set_xlabel('Number of Parameters')
-    axes[0, 1].set_ylabel('R² Score')
-    axes[0, 1].set_title('R² vs Model Complexity')
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # Plot 3: Best model predictions
-    best_pred = best_depth_result['pred']
-    axes[0, 2].scatter(y_test, best_pred, alpha=0.6)
-    axes[0, 2].plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-    axes[0, 2].set_xlabel('Actual Pressure')
-    axes[0, 2].set_ylabel('Predicted Pressure')
-    axes[0, 2].set_title(f'Best Model: {best_depth_result["layers"]} Layers (R²={best_depth_result["r2"]:.4f})')
-    axes[0, 2].grid(True)
-    
-    # Plot 4: Training curves for best model
-    best_train_losses = best_depth_result['train_losses']
-    best_val_losses = best_depth_result['val_losses']
-    axes[1, 0].plot(best_train_losses, label='Training Loss', alpha=0.7)
-    axes[1, 0].plot(best_val_losses, label='Validation Loss', alpha=0.7)
-    axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('Loss')
-    axes[1, 0].set_title('Best Model Training Curves')
-    axes[1, 0].legend()
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # Plot 5: Overfitting analysis
-    axes[1, 1].plot(range(0, 2000, 100), overfit_test_r2s, 'ro-', label='Test R²')
-    axes[1, 1].axhline(y=theoretical_max, color='purple', linestyle='--', label='Theoretical Max')
-    axes[1, 1].set_xlabel('Epoch')
-    axes[1, 1].set_ylabel('Test R²')
-    axes[1, 1].set_title('Massive Model: Overfitting Effect')
-    axes[1, 1].legend()
-    axes[1, 1].grid(True, alpha=0.3)
-    
-    # Plot 6: Performance summary
-    models = ['Random Forest', 'Original Deep', 'Best Ultra-Deep', 'Overfitted', 'Theoretical Max']
-    scores = [0.5603, 0.5282, best_depth_result['r2'], final_r2, theoretical_max]
-    colors = ['red', 'green', 'blue', 'orange', 'purple']
-    
-    bars = axes[1, 2].bar(models, scores, color=colors, alpha=0.7)
-    axes[1, 2].set_ylabel('R² Score')
-    axes[1, 2].set_title('Model Performance Summary')
-    axes[1, 2].tick_params(axis='x', rotation=45)
-    
-    # Add value labels on bars
-    for bar, score in zip(bars, scores):
-        axes[1, 2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005, 
-                       f'{score:.3f}', ha='center', va='bottom', fontweight='bold')
-    
-    axes[1, 2].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.show()
+# Create plots
+plt.figure(figsize=(15, 5))
 
-# ========================================
-# FINAL ANALYSIS
-# ========================================
-print("\n" + "="*80)
-print("FINAL ANALYSIS: CAN WE REACH R² ≈ 100%?")
-print("="*80)
+# Plot 1: Training and validation loss
+plt.subplot(1, 3, 1)
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Val Loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
 
-print(f"🎯 THEORETICAL MAXIMUM R²: {theoretical_max:.4f} ({theoretical_max*100:.1f}%)")
-print(f"🔬 BEST ACHIEVED R²: {max(best_depth_result['r2'], final_r2) if depth_results else final_r2:.4f}")
+# Plot 2: Predictions vs Actual
+plt.subplot(1, 3, 2)
+plt.plot(targets_actual, label='Actual', alpha=0.7, marker='o', markersize=4)
+plt.plot(predictions_actual, label='Predicted', alpha=0.7, marker='s', markersize=4)
+plt.title('Predictions vs Actual')
+plt.xlabel('Test Sample')
+plt.ylabel('Pressure')
+plt.legend()
+plt.grid(True)
 
-gap_to_theoretical = theoretical_max - (max(best_depth_result['r2'], final_r2) if depth_results else final_r2)
-print(f"📊 Gap to theoretical maximum: {gap_to_theoretical:.4f} ({gap_to_theoretical/theoretical_max*100:.1f}%)")
+# Plot 3: Correlation scatter plot
+plt.subplot(1, 3, 3)
+plt.scatter(targets_actual, predictions_actual, alpha=0.6, s=50)
+plt.plot([targets_actual.min(), targets_actual.max()], 
+         [targets_actual.min(), targets_actual.max()], 'r--', lw=2)
+plt.xlabel('Actual Pressure')
+plt.ylabel('Predicted Pressure')
+plt.title(f'Correlation (R² = {r2:.4f})')
+plt.grid(True)
 
-print("\n🧠 INSIGHTS:")
-print("1. Adding more layers shows diminishing returns")
-print("2. Very deep networks risk overfitting without more data")
-print("3. The theoretical maximum is limited by data noise/measurement error")
-print("4. R² ≈ 100% is impossible due to inherent variability in real-world data")
+# Add perfect prediction line and R² text
+plt.text(0.05, 0.95, f'R² = {r2:.4f}\nMSE = {mse:.1f}\nMAE = {mae:.1f}', 
+         transform=plt.gca().transAxes, verticalalignment='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-print(f"\n💡 CONCLUSION:")
-if theoretical_max < 0.8:
-    print("   Your data has inherent limitations that prevent R² ≈ 100%")
-    print("   This is normal for real-world engineering data!")
-    print("   Focus on practical performance rather than perfect prediction")
-else:
-    print("   Higher R² might be possible with:")
-    print("   - More data points")
-    print("   - Additional input features (temperature, etc.)")
-    print("   - Better measurement precision")
+plt.tight_layout()
+plt.show()
+
+print("\nDone!")
+
+# Optional: Save the model
+# torch.save(model.state_dict(), 'deep_nn_flow_pressure_model.pth')
+# print("Model saved as 'deep_nn_flow_pressure_model.pth'")
