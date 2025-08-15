@@ -22,7 +22,7 @@ print(f"Using device: {device}")
 
 # Load data
 print("Loading data...")
-df = pd.read_excel('')
+df = pd.read_excel('your_data_file.xlsx')  # Add your file path here
 flows = df['Flow Rate'].values
 pressures = df['Pressure'].values
 
@@ -43,7 +43,7 @@ print(f"Normalized pressure range: {pressures_normalized.min():.3f} to {pressure
 # Combine data for sequence models
 data_normalized = np.column_stack([flows_normalized, pressures_normalized])
 
-# FIXED: Create non-overlapping sequences to prevent data leakage (like our final LSTM_model.py)
+# Create non-overlapping sequences to prevent data leakage
 print("Creating sequences for LSTM models...")
 def create_sequences_no_overlap(data, seq_length):
     """Create non-overlapping sequences to prevent data leakage"""
@@ -71,7 +71,7 @@ Y_direct = pressures_normalized
 
 print(f"Direct mapping: {len(X_direct)} samples")
 
-# FIXED: Create flow-only sequences with non-overlapping approach (for RNN models)
+# Create flow-only sequences with non-overlapping approach (for RNN models)
 print("Creating flow-only sequences...")
 flow_seq = []
 pressure_targets = []
@@ -87,7 +87,7 @@ pressure_targets = np.array(pressure_targets)
 
 print(f"Flow-only sequences: {len(flow_seq)} samples")
 
-# Data splitting function (same as LSTM_model.py)
+# Data splitting function
 def split_data(X, Y, test_size=0.2):
     indices = np.random.permutation(len(X))
     X_shuffled = X[indices]
@@ -101,7 +101,7 @@ def split_data(X, Y, test_size=0.2):
     
     return X_train, Y_train, X_test, Y_test
 
-# Model Definitions (simplified, no batch norm)
+# Model Definitions
 
 # 1. Simple FNN Model (Direct mapping: flow -> pressure)
 class FNNModel(nn.Module):
@@ -132,7 +132,7 @@ class LSTMDenseDenseModel(nn.Module):
         # LSTM layer
         self.lstm = nn.LSTM(input_size=2, hidden_size=HIDDEN_SIZE, batch_first=True)
 
-        # Dense layers (fully connected) - FIXED naming
+        # Dense layers (fully connected)
         self.dense1 = nn.Linear(HIDDEN_SIZE, DENSE_SIZE)
         self.relu = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
@@ -142,7 +142,7 @@ class LSTMDenseDenseModel(nn.Module):
         lstm_out, (hidden, cell) = self.lstm(x)
         last_hidden = hidden[-1]
         
-        x = self.dense1(last_hidden)  # FIXED: was self.dense
+        x = self.dense1(last_hidden)
         x = self.relu(x)
         x = self.dropout1(x)
         predictions = self.dense2(x)
@@ -197,18 +197,18 @@ class DeepNNModel(nn.Module):
     def forward(self, x):
         return self.network(x)
 
-# Training function (same style as LSTM_model.py with ALL fixes)
+# Training function
 def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOCHS):
     print(f"\nTraining {model_name}...")
     
-    # Loss function and optimizer (same as LSTM_model.py)
+    # Loss function and optimizer
     MSE = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     train_losses = []
     val_losses = []
     
-    # Create validation set (same as LSTM_model.py)
+    # Create validation set
     val_split = int(0.8 * len(X_train))
     X_train_sub = X_train[:val_split]
     Y_train_sub = Y_train[:val_split]
@@ -220,7 +220,7 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
     
     # Early stopping parameters
     best_val_loss = float('inf')
-    patience = 50  # Same as our final LSTM version
+    patience = 50
     patience_counter = 0
     best_model_state = None
     
@@ -228,10 +228,10 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         total_loss = 0
         num_batches = 0
 
-        # FIXED: Set model to training mode
+        # Set model to training mode
         model.train()
         
-        # FIXED: Train on batches using ONLY the training subset (not full X_train)
+        # Train on batches using ONLY the training subset
         for i in range(0, len(X_train_sub), BATCH_SIZE):
             batch_X = X_train_sub[i:i+BATCH_SIZE].to(device)
             batch_Y = Y_train_sub[i:i+BATCH_SIZE].to(device)
@@ -252,7 +252,7 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         avg_loss = total_loss / num_batches
         train_losses.append(avg_loss)
 
-        # FIXED: Validation loss
+        # Validation loss
         model.eval()
         with torch.no_grad():
             val_outputs = model(X_val.to(device)).squeeze()
@@ -287,11 +287,11 @@ def train_model(model, X_train, Y_train, X_test, Y_test, model_name, epochs=EPOC
         test_predictions = model(X_test.to(device)).squeeze().cpu().numpy()
         test_targets = Y_test.cpu().numpy()
 
-    # FIXED: Convert back to original scale using correct scaler
+    # Convert back to original scale
     predictions_actual = scaler_pressure.inverse_transform(test_predictions.reshape(-1, 1)).flatten()
     targets_actual = scaler_pressure.inverse_transform(test_targets.reshape(-1, 1)).flatten()
 
-    # FIXED: Calculate fidelity metrics (corrected R² calculation)
+    # Calculate fidelity metrics
     r2 = r2_score(targets_actual, predictions_actual)
     mse = np.mean((targets_actual - predictions_actual) ** 2)
     mae = np.mean(np.abs(targets_actual - predictions_actual))
@@ -305,17 +305,16 @@ print("\n" + "="*60)
 print("MODEL COMPARISON")
 print("="*60)
 
-# 📊 NOW COMPARING 5 MODELS:
-
+# Training all 4 requested models:
 # 1. **FNN** - Direct flow → pressure mapping
-# 2. **LSTM-Dense-Dense** - Flow+pressure sequences → pressure (your original fixed model)
+# 2. **LSTM-Dense-Dense** - Flow+pressure sequences → pressure
 # 3. **Dense-RNN-Dense** - Flow sequences → pressure (RNN version) 
-# 4. **Dense-LSTM-Dense** - Flow sequences → pressure (LSTM version)
-# 5. **Deep NN** - Direct flow → pressure mapping (deeper network)
+# 4. **Deep NN** - Direct flow → pressure mapping (deeper network)
 
 results = {}
 
 # 1. Train FNN Model (uses direct mapping)
+print("Preparing data for FNN...")
 X_train_direct, Y_train_direct, X_test_direct, Y_test_direct = split_data(X_direct, Y_direct)
 fnn_model = FNNModel().to(device)
 fnn_r2, fnn_mse, fnn_pred, fnn_targets, fnn_train_loss, fnn_val_loss = train_model(
@@ -326,42 +325,32 @@ results['FNN'] = {
     'train_losses': fnn_train_loss, 'val_losses': fnn_val_loss
 }
 
-# 2. Train LSTM Model (uses sequences)
+# 2. Train LSTM-Dense-Dense Model (uses flow+pressure sequences)
+print("Preparing data for LSTM-Dense-Dense...")
 X_train_seq, Y_train_seq, X_test_seq, Y_test_seq = split_data(X_seq, Y_seq)
-lstm_model = LSTMModel().to(device)
+lstm_model = LSTMDenseDenseModel().to(device)  # Fixed model name
 lstm_r2, lstm_mse, lstm_pred, lstm_targets, lstm_train_loss, lstm_val_loss = train_model(
-    lstm_model, X_train_seq, Y_train_seq, X_test_seq, Y_test_seq, "LSTM"
+    lstm_model, X_train_seq, Y_train_seq, X_test_seq, Y_test_seq, "LSTM-Dense-Dense"
 )
-results['LSTM'] = {
+results['LSTM-Dense-Dense'] = {
     'r2': lstm_r2, 'mse': lstm_mse, 'pred': lstm_pred, 'targets': lstm_targets,
     'train_losses': lstm_train_loss, 'val_losses': lstm_val_loss
 }
 
-# 3. Train Dense-LSTM-Dense Model (uses flow sequences only with non-overlapping)
-# FIXED: Create flow-only sequences with non-overlapping approach
-flow_seq = []
-pressure_targets = []
-step_size = SEQ_LENGTH  # Non-overlapping
-
-for i in range(0, len(flows_normalized) - SEQ_LENGTH, step_size):
-    if i + SEQ_LENGTH < len(flows_normalized):
-        flow_seq.append(flows_normalized[i:i+SEQ_LENGTH])
-        pressure_targets.append(pressures_normalized[i+SEQ_LENGTH])
-
-flow_seq = np.array(flow_seq)
-pressure_targets = np.array(pressure_targets)
-
+# 3. Train Dense-RNN-Dense Model (uses flow sequences only)
+print("Preparing data for Dense-RNN-Dense...")
 X_train_flow, Y_train_flow, X_test_flow, Y_test_flow = split_data(flow_seq, pressure_targets)
-dense_lstm_model = DenseLSTMDenseModel().to(device)
-dlstm_r2, dlstm_mse, dlstm_pred, dlstm_targets, dlstm_train_loss, dlstm_val_loss = train_model(
-    dense_lstm_model, X_train_flow, Y_train_flow, X_test_flow, Y_test_flow, "Dense-LSTM-Dense"
+dense_rnn_model = DenseRNNDenseModel().to(device)  # Fixed model name
+drnn_r2, drnn_mse, drnn_pred, drnn_targets, drnn_train_loss, drnn_val_loss = train_model(
+    dense_rnn_model, X_train_flow, Y_train_flow, X_test_flow, Y_test_flow, "Dense-RNN-Dense"
 )
-results['Dense-LSTM-Dense'] = {
-    'r2': dlstm_r2, 'mse': dlstm_mse, 'pred': dlstm_pred, 'targets': dlstm_targets,
-    'train_losses': dlstm_train_loss, 'val_losses': dlstm_val_loss
+results['Dense-RNN-Dense'] = {
+    'r2': drnn_r2, 'mse': drnn_mse, 'pred': drnn_pred, 'targets': drnn_targets,
+    'train_losses': drnn_train_loss, 'val_losses': drnn_val_loss
 }
 
 # 4. Train Deep NN Model (uses direct mapping)
+print("Preparing data for Deep NN...")
 deep_nn_model = DeepNNModel().to(device)
 deep_r2, deep_mse, deep_pred, deep_targets, deep_train_loss, deep_val_loss = train_model(
     deep_nn_model, X_train_direct, Y_train_direct, X_test_direct, Y_test_direct, "Deep NN"
@@ -394,7 +383,7 @@ print(f"✅ Dense-RNN-Dense: Sequences of [flow only] → pressure")
 print(f"✅ Deep NN: Direct mapping (flow → pressure) with deeper layers")
 print(f"\n🔧 All models include: early stopping, dropout, proper data splits, non-overlapping sequences")
 
-# Create plots (same style as our fixed LSTM_model.py with correlation plot)
+# Create plots
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 
 # Plot 1: R² comparison
@@ -421,7 +410,7 @@ axes[0, 1].set_title(f'Best Model: {best_model_name} - Predictions vs Actual')
 axes[0, 1].legend()
 axes[0, 1].grid(True)
 
-# Plot 3: Best model correlation scatter plot (like our fixed LSTM_model.py)
+# Plot 3: Best model correlation scatter plot
 axes[1, 0].scatter(best_result['targets'], best_result['pred'], alpha=0.6, s=50)
 axes[1, 0].plot([best_result['targets'].min(), best_result['targets'].max()], 
                 [best_result['targets'].min(), best_result['targets'].max()], 'r--', lw=2)
@@ -430,7 +419,7 @@ axes[1, 0].set_ylabel('Predicted Pressure')
 axes[1, 0].set_title(f'Best Model Correlation (R² = {best_r2:.4f})')
 axes[1, 0].grid(True)
 
-# Add R² text box like our fixed LSTM_model.py
+# Add R² text box
 axes[1, 0].text(0.05, 0.95, f'R² = {best_r2:.4f}', 
                 transform=axes[1, 0].transAxes, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
@@ -439,7 +428,7 @@ axes[1, 0].text(0.05, 0.95, f'R² = {best_r2:.4f}',
 axes[1, 1].plot(best_result['train_losses'], label='Train Loss')
 axes[1, 1].plot(best_result['val_losses'], label='Val Loss')
 axes[1, 1].set_xlabel('Epoch')
-axes[1, 1].set_ylabel('Loss')  # FIXED: was xlabel
+axes[1, 1].set_ylabel('Loss')
 axes[1, 1].set_title(f'{best_model_name} Training and Validation Loss')
 axes[1, 1].legend()
 axes[1, 1].grid(True)
