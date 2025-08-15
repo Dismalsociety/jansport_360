@@ -171,6 +171,48 @@ class LSTMModel(nn.Module):
         x = self.dense2(x)
         return x.squeeze()
 
+class DeepNNModel(nn.Module):
+    def __init__(self):
+        super(DeepNNModel, self).__init__()
+        # Deep network with 4 hidden layers
+        self.dense1 = nn.Linear(1, 128)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(DROPOUT)
+        
+        self.dense2 = nn.Linear(128, 96)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(DROPOUT)
+        
+        self.dense3 = nn.Linear(96, 64)
+        self.relu3 = nn.ReLU()
+        self.dropout3 = nn.Dropout(DROPOUT)
+        
+        self.dense4 = nn.Linear(64, 32)
+        self.relu4 = nn.ReLU()
+        self.dropout4 = nn.Dropout(DROPOUT)
+        
+        self.output = nn.Linear(32, 1)
+    
+    def forward(self, x):
+        x = self.dense1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        x = self.dense2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        
+        x = self.dense3(x)
+        x = self.relu3(x)
+        x = self.dropout3(x)
+        
+        x = self.dense4(x)
+        x = self.relu4(x)
+        x = self.dropout4(x)
+        
+        x = self.output(x)
+        return x.squeeze()
+
 # Training function
 def train_model(model, X_train, Y_train, X_test, Y_test, model_name):
     print(f"\n=== Training {model_name} ===")
@@ -292,6 +334,10 @@ results = {}
 fnn_model = FNNModel().to(device)
 results['FNN'] = train_model(fnn_model, X_direct_train, Y_direct_train, X_direct_test, Y_direct_test, 'FNN')
 
+# Train Deep NN (uses direct mapping)
+deep_nn_model = DeepNNModel().to(device)
+results['Deep NN'] = train_model(deep_nn_model, X_direct_train, Y_direct_train, X_direct_test, Y_direct_test, 'Deep NN')
+
 # Train Dense-RNN-Dense (uses sequences)
 rnn_model = DenseRNNDenseModel().to(device)
 results['Dense-RNN-Dense'] = train_model(rnn_model, X_seq_train, Y_seq_train, X_seq_test, Y_seq_test, 'Dense-RNN-Dense')
@@ -325,11 +371,12 @@ fig, axes = plt.subplots(2, 2, figsize=(15, 10))
 # Plot 1: R² comparison
 model_names = list(results.keys())
 r2_values = [results[name]['r2'] for name in model_names]
-colors = ['blue', 'green', 'red', 'orange']
+colors = ['blue', 'purple', 'green', 'red', 'orange']  # Added purple for Deep NN
 
-bars = axes[0, 0].bar(model_names, r2_values, color=colors, alpha=0.7)
+bars = axes[0, 0].bar(model_names, r2_values, color=colors[:len(model_names)], alpha=0.7)
 axes[0, 0].set_ylabel('R² Score')
 axes[0, 0].set_title('Model Performance Comparison')
+axes[0, 0].set_xticklabels(model_names, rotation=45, ha='right')  # Rotate labels for better fit
 axes[0, 0].grid(True, alpha=0.3)
 
 # Add value labels on bars
@@ -363,7 +410,7 @@ axes[1, 0].grid(True)
 
 # Plot 4: All model predictions comparison (sample)
 axes[1, 1].plot(best_targets[:20], 'ko-', label='Actual', markersize=6)
-colors_pred = ['blue', 'green', 'red', 'orange']
+colors_pred = ['blue', 'purple', 'green', 'red', 'orange']  # Added purple for Deep NN
 for i, (name, result) in enumerate(results.items()):
     pred_sample = result['predictions'][:20]
     axes[1, 1].plot(pred_sample, 'o-', color=colors_pred[i], 
@@ -372,7 +419,7 @@ for i, (name, result) in enumerate(results.items()):
 axes[1, 1].set_xlabel('Sample Index')
 axes[1, 1].set_ylabel('Pressure')
 axes[1, 1].set_title('Sample Predictions Comparison')
-axes[1, 1].legend()
+axes[1, 1].legend(fontsize=8)  # Smaller font for 5 models
 axes[1, 1].grid(True)
 
 plt.tight_layout()
