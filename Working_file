@@ -1,3 +1,13 @@
-from sklearn.metrics import r2_score
-r2_sklearn = r2_score(targets_flat, predictions_flat)
-print(f"Sklearn R²: {r2_sklearn}")
+# Make sure you're using this calculation:
+predictions_flat = predictions_actual.flatten()
+targets_flat = targets_actual.flatten()
+
+ss_res = np.sum((targets_flat - predictions_flat) ** 2)  # Residual sum of squares
+ss_tot = np.sum((targets_flat - np.mean(targets_flat)) ** 2)  # Total sum of squares
+r_squared = 1 - (ss_res / ss_tot)
+
+print(f"SS_res: {ss_res}")
+print(f"SS_tot: {ss_tot}")
+print(f"Mean target: {np.mean(targets_flat)}")
+print(f"Predictions range: {predictions_flat.min():.2f} to {predictions_flat.max():.2f}")
+print(f"Targets range: {targets_flat.min():.2f} to {targets_flat.max():.2f}")
